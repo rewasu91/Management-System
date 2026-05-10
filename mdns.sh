@@ -5,7 +5,7 @@
 # Supports: systemd-resolved, resolvconf, static resolv.conf
 
 LINE="============================================================"
-SMALL_LINE="------------------------------------------------------------"
+SELECTED_DNS_FILE="/etc/dns-manager-selected.conf"
 
 pause() {
   echo
@@ -31,14 +31,23 @@ detect_resolver() {
   fi
 }
 
+save_selected_dns() {
+  SELECTED_DNS="$1"
+  echo "$SELECTED_DNS" > "$SELECTED_DNS_FILE"
+}
+
 show_current_dns_short() {
-  DNS_NOW="$(grep "^nameserver" /etc/resolv.conf 2>/dev/null | awk '{print $2}' | awk '!seen[$0]++')"
+  if [ -f "$SELECTED_DNS_FILE" ]; then
+    DNS_NOW="$(cat "$SELECTED_DNS_FILE")"
+  else
+    DNS_NOW="$(grep "^nameserver" /etc/resolv.conf 2>/dev/null | awk '{print $2}' | awk '!seen[$0]++')"
+  fi
 
   if [ -z "$DNS_NOW" ]; then
-    echo "   No nameserver found"
+    echo "   No DNS profile selected"
   else
     echo "$DNS_NOW" | while read dns; do
-      echo "   - $dns"
+      [ -n "$dns" ] && echo "   - $dns"
     done
   fi
 }
@@ -52,8 +61,8 @@ show_header() {
   echo "$LINE"
   echo " Resolver Type : $RESOLVER_TYPE"
   echo " Config Path   : /etc/resolv.conf"
-  echo "$SMALL_LINE"
-  echo " Current DNS"
+  echo
+  echo " Selected DNS"
   show_current_dns_short
   echo "$LINE"
 }
@@ -142,6 +151,8 @@ apply_dns_profile() {
 
   detect_resolver
 
+  SELECTED_DNS="$(echo "$NS_LIST" | awk '/^nameserver/ {print $2}')"
+
   echo
   echo "$LINE"
   echo " Apply DNS Profile"
@@ -156,6 +167,7 @@ apply_dns_profile() {
   case "$confirm" in
     y|Y)
       backup_files
+      save_selected_dns "$SELECTED_DNS"
 
       if [ "$RESOLVER_TYPE" = "systemd-resolved" ]; then
         apply_systemd_resolved "$DNS_MAIN" "$DNS_FALLBACK"
@@ -170,10 +182,9 @@ apply_dns_profile() {
       echo
       echo "$LINE"
       echo " DNS configuration updated successfully."
-      echo "$SMALL_LINE"
-      echo " Active /etc/resolv.conf"
-      echo "$SMALL_LINE"
-      cat /etc/resolv.conf
+      echo
+      echo " Selected DNS"
+      show_current_dns_short
       echo "$LINE"
       ;;
     *)
@@ -214,7 +225,7 @@ custom_dns_menu() {
   echo "$LINE"
   echo " Enter DNS servers one by one."
   echo " Leave empty and press Enter when finished."
-  echo "$SMALL_LINE"
+  echo
   echo " Example:"
   echo "   9.9.9.9"
   echo "   149.112.112.112"
@@ -253,9 +264,17 @@ custom_dns_menu() {
 
 show_full_dns() {
   show_header
-  echo " Full DNS Configuration"
-  echo "$SMALL_LINE"
+
+  echo " Selected DNS Details"
+  show_current_dns_short
+
+  echo
+  echo "$LINE"
+  echo " Actual /etc/resolv.conf"
+  echo "$LINE"
+
   cat /etc/resolv.conf
+
   echo "$LINE"
   pause
 }
@@ -265,7 +284,7 @@ main_menu() {
     show_header
 
     echo " Available Options"
-    echo "$SMALL_LINE"
+    echo
     echo " [1] ControlD Ads Blocking DNS"
     echo "     Primary : 76.76.2.2, 76.76.10.2"
     echo "     Fallback: 1.1.1.1, 8.8.8.8"
