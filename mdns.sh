@@ -1,7 +1,6 @@
 #!/bin/bash
 
 # DNS Management System
-# Safe version
 # Supports: systemd-resolved, resolvconf, static resolv.conf
 
 LINE="============================================================"
