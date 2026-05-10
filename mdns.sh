@@ -1,18 +1,20 @@
 #!/bin/bash
 
 # DNS Management System
+# Safe version
 # Supports: systemd-resolved, resolvconf, static resolv.conf
 
 LINE="============================================================"
+SMALL_LINE="------------------------------------------------------------"
 
 pause() {
   echo
-  read -p "Press Enter to continue..."
+  read -p " Press Enter to continue..."
 }
 
 check_root() {
   if [ "$(id -u)" != "0" ]; then
-    echo "Error: Please run this script as root."
+    echo " Error: Please run this script as root."
     exit 1
   fi
 }
@@ -30,7 +32,15 @@ detect_resolver() {
 }
 
 show_current_dns_short() {
-  grep "^nameserver" /etc/resolv.conf 2>/dev/null | awk '{print "  - " $2}'
+  DNS_NOW="$(grep "^nameserver" /etc/resolv.conf 2>/dev/null | awk '{print $2}' | awk '!seen[$0]++')"
+
+  if [ -z "$DNS_NOW" ]; then
+    echo "   No nameserver found"
+  else
+    echo "$DNS_NOW" | while read dns; do
+      echo "   - $dns"
+    done
+  fi
 }
 
 show_header() {
@@ -41,9 +51,9 @@ show_header() {
   echo "                    DNS MANAGEMENT SYSTEM"
   echo "$LINE"
   echo " Resolver Type : $RESOLVER_TYPE"
-  echo " Resolv Path   : /etc/resolv.conf -> $RESOLV_TARGET"
-  echo "$LINE"
-  echo " Current DNS:"
+  echo " Config Path   : /etc/resolv.conf"
+  echo "$SMALL_LINE"
+  echo " Current DNS"
   show_current_dns_short
   echo "$LINE"
 }
@@ -54,6 +64,8 @@ backup_files() {
   [ -f /etc/resolv.conf ] && cp /etc/resolv.conf "/etc/resolv.conf.bak-$DATE_TAG" 2>/dev/null
   [ -f /etc/systemd/resolved.conf ] && cp /etc/systemd/resolved.conf "/etc/systemd/resolved.conf.bak-$DATE_TAG" 2>/dev/null
   [ -f /etc/resolvconf/resolv.conf.d/head ] && cp /etc/resolvconf/resolv.conf.d/head "/etc/resolvconf/resolv.conf.d/head.bak-$DATE_TAG" 2>/dev/null
+  [ -f /etc/resolvconf/resolv.conf.d/base ] && cp /etc/resolvconf/resolv.conf.d/base "/etc/resolvconf/resolv.conf.d/base.bak-$DATE_TAG" 2>/dev/null
+  [ -f /etc/resolvconf/resolv.conf.d/tail ] && cp /etc/resolvconf/resolv.conf.d/tail "/etc/resolvconf/resolv.conf.d/tail.bak-$DATE_TAG" 2>/dev/null
 }
 
 restart_dns_service() {
@@ -68,6 +80,17 @@ restart_dns_service() {
   else
     systemctl restart networking 2>/dev/null
   fi
+}
+
+build_ns_list() {
+  NS_LIST=""
+
+  for dns in "$@"; do
+    if [ -n "$dns" ]; then
+      echo "$NS_LIST" | grep -q "nameserver $dns" || NS_LIST="${NS_LIST}nameserver $dns
+"
+    fi
+  done
 }
 
 apply_systemd_resolved() {
@@ -89,51 +112,46 @@ apply_resolvconf() {
   NS_LIST="$1"
 
   mkdir -p /etc/resolvconf/resolv.conf.d
-  echo "$NS_LIST" > /etc/resolvconf/resolv.conf.d/head
 
+  echo "$NS_LIST" > /etc/resolvconf/resolv.conf.d/head
+  : > /etc/resolvconf/resolv.conf.d/base
+  : > /etc/resolvconf/resolv.conf.d/tail
+
+  resolvconf -u 2>/dev/null
   restart_dns_service
 }
 
 apply_static_resolv() {
   NS_LIST="$1"
 
-  rm -f /etc/resolv.conf
   echo "$NS_LIST" > /etc/resolv.conf
-
   restart_dns_service
 }
 
-apply_dns() {
-  MODE="$1"
+clean_duplicate_resolvconf() {
+  if [ "$RESOLVER_TYPE" = "resolvconf" ]; then
+    resolvconf -u 2>/dev/null
+  fi
+}
+
+apply_dns_profile() {
+  TITLE="$1"
+  DNS_MAIN="$2"
+  DNS_FALLBACK="$3"
+  NS_LIST="$4"
 
   detect_resolver
 
-  if [ "$MODE" = "ads" ]; then
-    TITLE="Block Ads DNS"
-    DNS_MAIN="76.76.2.2 76.76.10.2"
-    DNS_FALLBACK="1.1.1.1 8.8.8.8"
-    NS_LIST="nameserver 76.76.2.2
-nameserver 76.76.10.2
-nameserver 1.1.1.1
-nameserver 8.8.8.8"
-
-  else
-    TITLE="Default DNS"
-    DNS_MAIN="1.1.1.1 8.8.8.8"
-    DNS_FALLBACK=""
-    NS_LIST="nameserver 1.1.1.1
-nameserver 8.8.8.8"
-  fi
-
   echo
   echo "$LINE"
-  echo " Apply DNS Profile: $TITLE"
+  echo " Apply DNS Profile"
   echo "$LINE"
+  echo " Profile       : $TITLE"
   echo " Resolver Type : $RESOLVER_TYPE"
-  echo " DNS Main      : $DNS_MAIN"
-  echo " DNS Fallback  : ${DNS_FALLBACK:-None}"
+  echo " Primary DNS   : $DNS_MAIN"
+  echo " Fallback DNS  : ${DNS_FALLBACK:-None}"
   echo "$LINE"
-  read -p " Continue? [y/N]: " confirm
+  read -p " Continue with this DNS configuration? [y/N]: " confirm
 
   case "$confirm" in
     y|Y)
@@ -147,95 +165,96 @@ nameserver 8.8.8.8"
         apply_static_resolv "$NS_LIST"
       fi
 
+      clean_duplicate_resolvconf
+
       echo
       echo "$LINE"
-      echo " DNS has been updated successfully."
-      echo "$LINE"
-      echo " Final /etc/resolv.conf:"
-      echo "$LINE"
+      echo " DNS configuration updated successfully."
+      echo "$SMALL_LINE"
+      echo " Active /etc/resolv.conf"
+      echo "$SMALL_LINE"
       cat /etc/resolv.conf
       echo "$LINE"
       ;;
     *)
-      echo "Cancelled."
+      echo " Operation cancelled."
       ;;
   esac
 
   pause
 }
 
+use_ads_dns() {
+  build_ns_list "76.76.2.2" "76.76.10.2" "1.1.1.1" "8.8.8.8"
+
+  apply_dns_profile \
+    "ControlD Ads Blocking DNS" \
+    "76.76.2.2 76.76.10.2" \
+    "1.1.1.1 8.8.8.8" \
+    "$NS_LIST"
+}
+
+use_default_dns() {
+  build_ns_list "1.1.1.1" "8.8.8.8"
+
+  apply_dns_profile \
+    "Default DNS" \
+    "1.1.1.1 8.8.8.8" \
+    "" \
+    "$NS_LIST"
+}
+
 custom_dns_menu() {
   DNS_LIST=""
-  NS_LIST=""
+  DNS_ARRAY=""
 
   echo
   echo "$LINE"
   echo " Custom DNS Setup"
   echo "$LINE"
-  echo " Enter DNS one by one."
-  echo " Example: 9.9.9.9"
-  echo " Press Enter without typing anything when finished."
+  echo " Enter DNS servers one by one."
+  echo " Leave empty and press Enter when finished."
+  echo "$SMALL_LINE"
+  echo " Example:"
+  echo "   9.9.9.9"
+  echo "   149.112.112.112"
   echo "$LINE"
 
   while true; do
-    read -p " Enter DNS: " dns_input
+    read -p " DNS Server: " dns_input
 
     if [ -z "$dns_input" ]; then
       break
     fi
 
+    echo "$DNS_LIST" | grep -q "$dns_input" && {
+      echo " DNS already added. Skipped."
+      continue
+    }
+
     DNS_LIST="$DNS_LIST $dns_input"
-    NS_LIST="${NS_LIST}nameserver $dns_input
-"
+    DNS_ARRAY="$DNS_ARRAY $dns_input"
   done
 
   if [ -z "$DNS_LIST" ]; then
-    echo "No DNS entered. Cancelled."
+    echo " No DNS entered. Operation cancelled."
     pause
     return
   fi
 
-  echo
-  echo "$LINE"
-  echo " Custom DNS to apply:"
-  echo "$NS_LIST"
-  echo "$LINE"
-  read -p " Continue? [y/N]: " confirm
+  build_ns_list $DNS_ARRAY
 
-  case "$confirm" in
-    y|Y)
-      detect_resolver
-      backup_files
-
-      if [ "$RESOLVER_TYPE" = "systemd-resolved" ]; then
-        apply_systemd_resolved "$DNS_LIST" ""
-      elif [ "$RESOLVER_TYPE" = "resolvconf" ]; then
-        apply_resolvconf "$NS_LIST"
-      else
-        apply_static_resolv "$NS_LIST"
-      fi
-
-      echo
-      echo "$LINE"
-      echo " Custom DNS has been updated successfully."
-      echo "$LINE"
-      echo " Final /etc/resolv.conf:"
-      echo "$LINE"
-      cat /etc/resolv.conf
-      echo "$LINE"
-      ;;
-    *)
-      echo "Cancelled."
-      ;;
-  esac
-
-  pause
+  apply_dns_profile \
+    "Custom DNS" \
+    "$DNS_LIST" \
+    "" \
+    "$NS_LIST"
 }
 
 show_full_dns() {
   show_header
-  echo " Full /etc/resolv.conf content:"
-  echo "$LINE"
+  echo " Full DNS Configuration"
+  echo "$SMALL_LINE"
   cat /etc/resolv.conf
   echo "$LINE"
   pause
@@ -245,28 +264,30 @@ main_menu() {
   while true; do
     show_header
 
-    echo " [1] Use ControlD Ads Blocking DNS"
+    echo " Available Options"
+    echo "$SMALL_LINE"
+    echo " [1] ControlD Ads Blocking DNS"
     echo "     Primary : 76.76.2.2, 76.76.10.2"
     echo "     Fallback: 1.1.1.1, 8.8.8.8"
     echo
-    echo " [2] Use Default DNS"
+    echo " [2] Default DNS"
     echo "     Primary : 1.1.1.1, 8.8.8.8"
     echo
-    echo " [3] Use Custom DNS"
-    echo "     Enter your own DNS servers"
+    echo " [3] Custom DNS"
+    echo "     Manually enter your preferred DNS servers"
     echo
     echo " [4] Show Current DNS Details"
     echo
     echo " [0] Exit"
     echo "$LINE"
-    read -p " Select option: " opt
+    read -p " Select an option: " opt
 
     case "$opt" in
       1)
-        apply_dns "ads"
+        use_ads_dns
         ;;
       2)
-        apply_dns "default"
+        use_default_dns
         ;;
       3)
         custom_dns_menu
@@ -275,11 +296,11 @@ main_menu() {
         show_full_dns
         ;;
       0)
-        echo "Exiting DNS Management System."
+        echo " Exiting DNS Management System."
         exit 0
         ;;
       *)
-        echo "Invalid option."
+        echo " Invalid option."
         pause
         ;;
     esac
