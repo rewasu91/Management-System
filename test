@@ -401,32 +401,32 @@ https://linearjitp-playback.astro.com.my/dash-wv/linear/5016/default_primary.mpd
 #https://ott.rocket-ott.shop/penjilat/rkd1.mpd?id=5016&token=4e538ab7-e88d-4530-aa92-20590a53cfbc
 https://linearjitp-playback.astro.com.my/dash-wv/linear/5016/default_ott.mpd
 
-#AstroAECFHD 305
-#EXTINF:-1 tvg-id="306.astro" tvg-name="Astro AEC" group-title="./All Channel;Chinese" group-logo="https://bv83.short.gy/gilatvpng" ch-number="305" tvg-logo="http://linear-poster.astro.com.my/prod/logo/AstroAEC_2024.png",305 TVB Classic FHD
+#AstroAECFHD 306
+#EXTINF:-1 tvg-id="306.astro" tvg-name="Astro AEC" group-title="./All Channel;Chinese" group-logo="https://bv83.short.gy/gilatvpng" ch-number="306" tvg-logo="http://linear-poster.astro.com.my/prod/logo/AstroAEC_2024.png",306 Astro AEC FHD
 #KODIPROP:inputstream.adaptive.license_type=clearkey
 #KODIPROP:inputstream.adaptive.license_key=06282157da4e8f97623a70ed017fad10:8da72ca8501a4deb4bfc381fe1737ef4
 #EXTVLCOPT:http-user-agent=Mozilla/5.0 (Android; Android 6.0; SAMSUNG SM-D920I Build/MMB29K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.0.0.0 Mobile Safari/537.36
 #https://ott.rocket-ott.shop/penjilat/rkd.mpd?id=2400&token=4e538ab7-e88d-4530-aa92-20590a53cfbc
 https://linearjitp-playback.astro.com.my/dash-wv/linear/2400/default_primary.mpd
 
-#AstroAECHD 305
-#EXTINF:-1 tvg-id="306.astro" tvg-name="Astro AEC" group-title="./All Channel;Chinese" group-logo="https://bv83.short.gy/gilatvpng" ch-number="305" tvg-logo="http://linear-poster.astro.com.my/prod/logo/AstroAEC_2024.png",305 TVB Classic HD
+#AstroAECHD 306
+#EXTINF:-1 tvg-id="306.astro" tvg-name="Astro AEC" group-title="./All Channel;Chinese" group-logo="https://bv83.short.gy/gilatvpng" ch-number="306" tvg-logo="http://linear-poster.astro.com.my/prod/logo/AstroAEC_2024.png",306 Astro AEC HD
 #KODIPROP:inputstream.adaptive.license_type=clearkey
 #KODIPROP:inputstream.adaptive.license_key=06282157da4e8f97623a70ed017fad10:8da72ca8501a4deb4bfc381fe1737ef4
 #EXTVLCOPT:http-user-agent=Mozilla/5.0 (Android; Android 6.0; SAMSUNG SM-D920I Build/MMB29K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.0.0.0 Mobile Safari/537.36
 #https://ott.rocket-ott.shop/penjilat/rkd1.mpd?id=2400&token=4e538ab7-e88d-4530-aa92-20590a53cfbc
 https://linearjitp-playback.astro.com.my/dash-wv/linear/2400/default_ott.mpd
 
-#AstroQJFHD 305
-#EXTINF:-1 tvg-id="308.astro" tvg-name="Astro QJ" group-title="./All Channel;Chinese" group-logo="https://bv83.short.gy/gilatvpng" ch-number="305" tvg-logo="http://linear-poster.astro.com.my/prod/logo/AstroQJ_2024.png",305 TVB Classic FHD
+#AstroQJFHD 308
+#EXTINF:-1 tvg-id="308.astro" tvg-name="Astro QJ" group-title="./All Channel;Chinese" group-logo="https://bv83.short.gy/gilatvpng" ch-number="308" tvg-logo="http://linear-poster.astro.com.my/prod/logo/AstroQJ_2024.png",308 Astro QJ FHD
 #KODIPROP:inputstream.adaptive.license_type=clearkey
 #KODIPROP:inputstream.adaptive.license_key=89de71cf39be0946dec828edff84d010:9d5e036094bb77cbaf8867d3272c66d0
 #EXTVLCOPT:http-user-agent=Mozilla/5.0 (Android; Android 6.0; SAMSUNG SM-D920I Build/MMB29K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.0.0.0 Mobile Safari/537.36
 #https://ott.rocket-ott.shop/penjilat/rkd.mpd?id=2507&token=4e538ab7-e88d-4530-aa92-20590a53cfbc
 https://linearjitp-playback.astro.com.my/dash-wv/linear/2507/default_primary.mpd
 
-#AstroQJHD 305
-#EXTINF:-1 tvg-id="308.astro" tvg-name="Astro QJ" group-title="./All Channel;Chinese" group-logo="https://bv83.short.gy/gilatvpng" ch-number="305" tvg-logo="http://linear-poster.astro.com.my/prod/logo/AstroQJ_2024.png",305 TVB Classic HD
+#AstroQJHD 308
+#EXTINF:-1 tvg-id="308.astro" tvg-name="Astro QJ" group-title="./All Channel;Chinese" group-logo="https://bv83.short.gy/gilatvpng" ch-number="308" tvg-logo="http://linear-poster.astro.com.my/prod/logo/AstroQJ_2024.png",308 Astro QJ HD
 #KODIPROP:inputstream.adaptive.license_type=clearkey
 #KODIPROP:inputstream.adaptive.license_key=89de71cf39be0946dec828edff84d010:9d5e036094bb77cbaf8867d3272c66d0
 #EXTVLCOPT:http-user-agent=Mozilla/5.0 (Android; Android 6.0; SAMSUNG SM-D920I Build/MMB29K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.0.0.0 Mobile Safari/537.36
