@@ -78,6 +78,14 @@ wget -O msocks https://raw.githubusercontent.com/rewasu91/Management-System/refs
 
 ---
 
+## Disable IPV6
+
+```bash
+wget -O mipv6 https://raw.githubusercontent.com/rewasu91/Management-System/refs/heads/main/mipv6 && chmod +x mipv6 && ./mipv6
+```
+
+---
+
 # DNS Profiles
 
 ## ControlD Ads Blocking DNS
