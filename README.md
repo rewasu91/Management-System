@@ -19,6 +19,10 @@ Included features:
 - SSH service restart
 - Automatic SSH configuration backup
 
+```bash
+wget -O mroot https://raw.githubusercontent.com/rewasu91/Management-System/refs/heads/main/mroot.sh && chmod +x mroot && ./mroot
+```
+
 ---
 
 ## DNS Management System
@@ -38,6 +42,10 @@ Included features:
 - DNS cache flush
 - Resolver auto detection
 
+```bash
+wget -O mdns https://raw.githubusercontent.com/rewasu91/Management-System/refs/heads/main/mdns.sh && chmod +x mdns && ./mdns
+```
+
 ---
 
 ## Socks Management System
@@ -49,28 +57,6 @@ Included features:
 - Interactive shell interface
 - VPS networking utilities
 - Simple deployment system
-
----
-
-# Installation
-
-## Root Login System
-
-```bash
-wget -O mroot https://raw.githubusercontent.com/rewasu91/Management-System/refs/heads/main/mroot.sh && chmod +x mroot && ./mroot
-```
-
----
-
-## DNS Management System
-
-```bash
-wget -O mdns https://raw.githubusercontent.com/rewasu91/Management-System/refs/heads/main/mdns.sh && chmod +x mdns && ./mdns
-```
-
----
-
-## Socks Management System
 
 ```bash
 wget -O msocks https://raw.githubusercontent.com/rewasu91/Management-System/refs/heads/main/msocks.sh && chmod +x msocks && ./msocks
