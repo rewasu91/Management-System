@@ -78,6 +78,14 @@ wget -O msocks https://raw.githubusercontent.com/rewasu91/Management-System/refs
 
 ---
 
+## Reinstall VPS
+
+```bash
+wget -O mreinstall https://raw.githubusercontent.com/rewasu91/Management-System/refs/heads/main/mreinstall && chmod +x mreinstall && ./mreinstall
+```
+
+---
+
 ## Disable IPV6
 
 ```bash
