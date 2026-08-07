@@ -1,22 +1,23 @@
 # Management System
 
-Simple Linux management utilities for VPS and networking systems.
+Simple yet powerful Linux management utilities designed for VPS administration, networking, and server automation.
 
 ---
 
 # Features
 
-## Root Login System
+## 🔐 Root Login System
 
-Enable root login access safely through an automated shell script.
+Enable root login securely through an automated shell script.
 
-Included features:
+### Features
+
 - Root user detection
-- Sudo permission checking
-- Root password setup
-- SSH root login configuration
-- Password authentication enablement
-- SSH service restart
+- Sudo permission verification
+- Root password configuration
+- SSH Root Login enablement
+- Password Authentication configuration
+- Automatic SSH service restart
 - Automatic SSH configuration backup
 
 ```bash
@@ -25,22 +26,24 @@ wget -O mroot https://raw.githubusercontent.com/rewasu91/Management-System/refs/
 
 ---
 
-## DNS Management System
+## 🌐 DNS Management System
 
-Manage DNS profiles with automatic resolver detection support.
+Manage DNS settings easily with automatic resolver detection.
 
-Supported resolver systems:
+### Supported Resolver Systems
+
 - systemd-resolved
 - resolvconf
-- static `/etc/resolv.conf`
+- Static `/etc/resolv.conf`
 
-Included features:
+### Features
+
 - ControlD Ads Blocking DNS
-- Default DNS
-- Custom DNS Setup
-- Automatic backup
-- DNS cache flush
-- Resolver auto detection
+- Restore Default DNS
+- Custom DNS Configuration
+- Automatic Backup
+- DNS Cache Flush
+- Automatic Resolver Detection
 
 ```bash
 wget -O mdns https://raw.githubusercontent.com/rewasu91/Management-System/refs/heads/main/mdns.sh && chmod +x mdns && ./mdns
@@ -48,15 +51,17 @@ wget -O mdns https://raw.githubusercontent.com/rewasu91/Management-System/refs/h
 
 ---
 
-## Socks Management System
+## 🧦 SOCKS Management System
 
-Manage SOCKS proxy configurations easily through an interactive shell menu.
+Manage SOCKS proxy configurations using a simple interactive menu.
 
-Included features:
-- SOCKS configuration management
-- Interactive shell interface
-- VPS networking utilities
-- Simple deployment system
+### Features
+
+- SOCKS Configuration Management
+- Interactive Shell Interface
+- VPS Networking Utilities
+- Simple Deployment
+- Configuration Management
 
 ```bash
 wget -O msocks https://raw.githubusercontent.com/rewasu91/Management-System/refs/heads/main/msocks.sh && chmod +x msocks && ./msocks
@@ -64,7 +69,34 @@ wget -O msocks https://raw.githubusercontent.com/rewasu91/Management-System/refs
 
 ---
 
-## Reinstall VPS
+## 🔄 VPS Reinstallation System
+
+Reinstall your VPS directly from the terminal without accessing your provider's control panel.
+
+The script automatically detects your VPS provider and recommends compatible operating systems for installation.
+
+### Supported Operating Systems
+
+| Distribution | Supported Versions |
+|--------------|-------------------|
+| Debian | 11, 12, 13 |
+| Ubuntu | 22.04 LTS, 24.04 LTS, 26.04 LTS |
+
+### Features
+
+- Automatic VPS provider detection
+- Supported operating system recommendation
+- Automatic operating system installation
+- Preserve existing root password (supported providers only)
+- Automatic network configuration
+- Automatic reboot after installation
+- Supports major VPS providers
+
+> **Warning**
+>
+> Reinstalling your VPS will permanently erase all existing data.
+>
+> Please back up all important files before proceeding.
 
 ```bash
 wget -O mreinstall https://raw.githubusercontent.com/rewasu91/Management-System/refs/heads/main/mreinstall && chmod +x mreinstall && ./mreinstall
@@ -72,7 +104,22 @@ wget -O mreinstall https://raw.githubusercontent.com/rewasu91/Management-System/
 
 ---
 
-## Disable IPV6
+## 🌐 IPv6 Management System
+
+Disable IPv6 completely to improve compatibility with VPN services, Xray, HAProxy, Nginx, and other networking applications.
+
+### Features
+
+- Disable IPv6 permanently
+- Apply changes immediately
+- Automatic sysctl configuration
+- Automatic GRUB configuration (when required)
+- Supports Debian & Ubuntu
+- One-click configuration
+
+> **Note**
+>
+> A system reboot is recommended after disabling IPv6 to ensure all changes are applied.
 
 ```bash
 wget -O mipv6 https://raw.githubusercontent.com/rewasu91/Management-System/refs/heads/main/mipv6 && chmod +x mipv6 && ./mipv6
@@ -80,7 +127,19 @@ wget -O mipv6 https://raw.githubusercontent.com/rewasu91/Management-System/refs/
 
 ---
 
+# Requirements
+
+- Root Access
+- Debian 11 / 12 / 13
+- Ubuntu 22.04 / 24.04 / 26.04
+- Internet Connection
+
+---
+
 # Author
 
-GitHub:
+**Rewasu91**
+
+GitHub
+
 https://github.com/rewasu91
