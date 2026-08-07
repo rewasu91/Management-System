@@ -1,0 +1,135 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+TS="$(date +%Y%m%d-%H%M%S)"
+BACKUP="/root/httpupgrade-v3-backup-$TS"
+MAIN="/etc/funny/nginx/main.conf"
+HU="/etc/funny/config/http/http-upgrade.conf"
+HAP="/etc/haproxy/haproxy.cfg"
+XRAYCFG="/etc/funny/json/upgrade.json"
+XRAYBIN="/usr/local/xray-mod/xray"
+
+[[ $EUID -eq 0 ]] || { echo "[ERROR] Run as root."; exit 1; }
+mkdir -p "$BACKUP"
+for f in "$MAIN" "$HU" "$HAP" "$XRAYCFG"; do [[ -f "$f" ]] && cp -a "$f" "$BACKUP/"; done
+
+echo "[INFO] Backup: $BACKUP"
+
+# 1) Generic / must never load-balance into any HTTPUpgrade Xray inbound.
+python3 - "$MAIN" <<'PY'
+import re,sys
+p=sys.argv[1]
+s=open(p,encoding='utf-8').read()
+s=re.sub(r'(?m)^\s*server\s+127\.0\.0\.1:(?:8001|8002|8003)[^;]*;.*\n?', '', s)
+open(p,'w',encoding='utf-8').write(s)
+PY
+
+# 2) Dedicated, exact HTTPUpgrade routes. No rewrite. No trailing slash in proxy_pass.
+mkdir -p "$(dirname "$HU")"
+cat > "$HU" <<'NGINX'
+# Xray HTTPUpgrade - dedicated paths only
+location = /hu-vmess {
+    proxy_pass http://127.0.0.1:8001;
+    proxy_http_version 1.1;
+    proxy_redirect off;
+    proxy_set_header Host $host;
+    proxy_set_header Upgrade $http_upgrade;
+    proxy_set_header Connection "upgrade";
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto https;
+    proxy_connect_timeout 10s;
+    proxy_send_timeout 1d;
+    proxy_read_timeout 1d;
+    proxy_buffering off;
+    proxy_request_buffering off;
+    proxy_cache off;
+}
+
+location = /hu-vless {
+    proxy_pass http://127.0.0.1:8003;
+    proxy_http_version 1.1;
+    proxy_redirect off;
+    proxy_set_header Host $host;
+    proxy_set_header Upgrade $http_upgrade;
+    proxy_set_header Connection "upgrade";
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto https;
+    proxy_connect_timeout 10s;
+    proxy_send_timeout 1d;
+    proxy_read_timeout 1d;
+    proxy_buffering off;
+    proxy_request_buffering off;
+    proxy_cache off;
+}
+
+location = /hu-trojan {
+    proxy_pass http://127.0.0.1:8002;
+    proxy_http_version 1.1;
+    proxy_redirect off;
+    proxy_set_header Host $host;
+    proxy_set_header Upgrade $http_upgrade;
+    proxy_set_header Connection "upgrade";
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto https;
+    proxy_connect_timeout 10s;
+    proxy_send_timeout 1d;
+    proxy_read_timeout 1d;
+    proxy_buffering off;
+    proxy_request_buffering off;
+    proxy_cache off;
+}
+NGINX
+
+# 3) HAProxy must not kill an idle upgraded tunnel after only one minute.
+python3 - "$HAP" <<'PY'
+import re,sys
+p=sys.argv[1]
+s=open(p,encoding='utf-8').read()
+s=re.sub(r'(?m)^\s*timeout client\s+\S+\s*$', '    timeout client  1h', s)
+s=re.sub(r'(?m)^\s*timeout server\s+\S+\s*$', '    timeout server  1h', s)
+if not re.search(r'(?m)^\s*timeout tunnel\s+', s):
+    s=re.sub(r'(?m)^(\s*timeout server\s+1h\s*)$', r'\1\n    timeout tunnel  1h', s, count=1)
+open(p,'w',encoding='utf-8').write(s)
+PY
+
+restore() {
+  echo "[ERROR] Validation failed. Restoring backup..."
+  [[ -f "$BACKUP/main.conf" ]] && cp -a "$BACKUP/main.conf" "$MAIN"
+  [[ -f "$BACKUP/http-upgrade.conf" ]] && cp -a "$BACKUP/http-upgrade.conf" "$HU"
+  [[ -f "$BACKUP/haproxy.cfg" ]] && cp -a "$BACKUP/haproxy.cfg" "$HAP"
+}
+trap restore ERR
+
+echo "[INFO] Validating Nginx..."
+nginx -t
+
+echo "[INFO] Validating HAProxy..."
+haproxy -c -f "$HAP"
+
+if [[ -x "$XRAYBIN" && -f "$XRAYCFG" ]]; then
+  echo "[INFO] Validating Xray HTTPUpgrade config..."
+  "$XRAYBIN" run -test -config "$XRAYCFG"
+fi
+
+trap - ERR
+systemctl restart xray-hu
+systemctl restart nginx
+systemctl restart haproxy
+
+echo
+echo "[OK] HTTPUpgrade V3 patch applied."
+echo "     /hu-vmess  -> 127.0.0.1:8001"
+echo "     /hu-trojan -> 127.0.0.1:8002"
+echo "     /hu-vless  -> 127.0.0.1:8003"
+echo "     VLESS WS / remains separate."
+echo
+echo "[INFO] xray-hu status:"
+systemctl status xray-hu --no-pager -l | sed -n '1,15p' || true
+echo
+echo "[INFO] listeners:"
+ss -lntp | grep -E ':(443|971|8001|8002|8003)\b' || true
+echo
+echo "[INFO] Backup: $BACKUP"
