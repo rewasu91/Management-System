@@ -75,13 +75,6 @@ Reinstall your VPS directly from the terminal without accessing your provider's 
 
 The script automatically detects your VPS provider and recommends compatible operating systems for installation.
 
-### Supported Operating Systems
-
-| Distribution | Supported Versions |
-|--------------|-------------------|
-| Debian | 11, 12, 13 |
-| Ubuntu | 22.04 LTS, 24.04 LTS, 26.04 LTS |
-
 ### Features
 
 - Automatic VPS provider detection
@@ -124,15 +117,6 @@ Disable IPv6 completely to improve compatibility with VPN services, Xray, HAProx
 ```bash
 wget -O mipv6 https://raw.githubusercontent.com/rewasu91/Management-System/refs/heads/main/mipv6 && chmod +x mipv6 && ./mipv6
 ```
-
----
-
-# Requirements
-
-- Root Access
-- Debian 11 / 12 / 13
-- Ubuntu 22.04 / 24.04 / 26.04
-- Internet Connection
 
 ---
 
