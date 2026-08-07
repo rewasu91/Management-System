@@ -1,0 +1,131 @@
+#!/usr/bin/env bash
+set -u
+
+TS="$(date +%Y%m%d-%H%M%S)"
+BACKUP="/root/httpupgrade-path-fix-backup-$TS"
+
+NGINX_MAIN="/etc/funny/nginx/main.conf"
+NGINX_HU="/etc/funny/nginx/http-upgrade.conf"
+HAPROXY_CFG="/etc/haproxy/haproxy.cfg"
+
+echo "=================================================="
+echo " HTTP Upgrade Path Fix - Existing Server"
+echo "=================================================="
+echo
+
+if [[ $EUID -ne 0 ]]; then
+    echo "[ERROR] Please run as root."
+    exit 1
+fi
+
+mkdir -p "$BACKUP"
+
+for f in "$NGINX_MAIN" "$NGINX_HU" "$HAPROXY_CFG"; do
+    if [[ -f "$f" ]]; then
+        cp -a "$f" "$BACKUP/"
+    fi
+done
+
+echo "[INFO] Backup saved to: $BACKUP"
+
+if [[ ! -f "$NGINX_MAIN" ]]; then
+    echo "[ERROR] $NGINX_MAIN not found."
+    exit 1
+fi
+
+echo "[INFO] Removing HTTP Upgrade backend 127.0.0.1:8003 from generic upstream..."
+
+python3 - "$NGINX_MAIN" <<'PY'
+import re, sys
+path = sys.argv[1]
+text = open(path, encoding="utf-8").read()
+
+# Remove only server 127.0.0.1:8003; lines inside generic upstream blocks.
+text2 = re.sub(
+    r'(?m)^[ \t]*server[ \t]+127\.0\.0\.1:8003(?:[ \t]+[^;]*)?;[ \t]*\n?',
+    '',
+    text
+)
+
+if text2 == text:
+    print("[INFO] No 127.0.0.1:8003 generic upstream entry found; it may already be fixed.")
+else:
+    open(path, "w", encoding="utf-8").write(text2)
+    print("[OK] Removed 127.0.0.1:8003 from generic upstream.")
+PY
+
+# Ensure HU config exists and contains exact routes.
+if [[ -f "$NGINX_HU" ]]; then
+    echo "[INFO] Checking HTTP Upgrade routes..."
+    grep -q "8001" "$NGINX_HU" || echo "[WARN] VMess HU backend 8001 not found in $NGINX_HU"
+    grep -q "8002" "$NGINX_HU" || echo "[WARN] Trojan HU backend 8002 not found in $NGINX_HU"
+    grep -q "8003" "$NGINX_HU" || echo "[WARN] VLESS HU backend 8003 not found in $NGINX_HU"
+
+    grep -q "/hu-vmess" "$NGINX_HU" || echo "[WARN] /hu-vmess not found in $NGINX_HU"
+    grep -q "/hu-trojan" "$NGINX_HU" || echo "[WARN] /hu-trojan not found in $NGINX_HU"
+    grep -q "/hu-vless" "$NGINX_HU" || echo "[WARN] /hu-vless not found in $NGINX_HU"
+else
+    echo "[WARN] $NGINX_HU not found. Existing includes may define HU routes elsewhere."
+fi
+
+echo
+echo "[INFO] Validating Nginx..."
+if ! nginx -t; then
+    echo "[ERROR] Nginx validation failed. Restoring backup..."
+    [[ -f "$BACKUP/main.conf" ]] && cp -a "$BACKUP/main.conf" "$NGINX_MAIN"
+    [[ -f "$BACKUP/http-upgrade.conf" ]] && cp -a "$BACKUP/http-upgrade.conf" "$NGINX_HU"
+    exit 1
+fi
+
+if command -v haproxy >/dev/null 2>&1 && [[ -f "$HAPROXY_CFG" ]]; then
+    echo
+    echo "[INFO] Validating HAProxy..."
+    if ! haproxy -c -f "$HAPROXY_CFG"; then
+        echo "[ERROR] HAProxy validation failed."
+        echo "[INFO] Nginx change remains safe, but HAProxy was not restarted."
+        exit 1
+    fi
+fi
+
+echo
+echo "[INFO] Restarting services..."
+systemctl restart nginx
+
+if systemctl list-unit-files | grep -q '^haproxy\.service'; then
+    systemctl restart haproxy
+fi
+
+if systemctl list-unit-files | grep -q '^xray-hu\.service'; then
+    systemctl restart xray-hu
+fi
+
+echo
+echo "[INFO] Service status:"
+systemctl --no-pager --full status nginx 2>/dev/null | sed -n '1,8p'
+echo
+systemctl --no-pager --full status haproxy 2>/dev/null | sed -n '1,8p' || true
+echo
+systemctl --no-pager --full status xray-hu 2>/dev/null | sed -n '1,10p' || true
+
+echo
+echo "[INFO] Relevant listeners:"
+ss -lntp 2>/dev/null | grep -E ':(443|971|8001|8002|8003)\b' || true
+
+echo
+echo "[INFO] Current relevant Nginx lines:"
+grep -RniE 'backend_servers|127\.0\.0\.1:(971|8001|8002|8003)|/hu-(vless|vmess|trojan)' \
+    /etc/funny/nginx 2>/dev/null || true
+
+echo
+echo "=================================================="
+echo "[OK] Patch completed."
+echo
+echo "Expected routing:"
+echo "  VLESS WS /          -> 127.0.0.1:971"
+echo "  VMess HTTP Upgrade  -> /hu-vmess  -> 127.0.0.1:8001"
+echo "  Trojan HTTP Upgrade -> /hu-trojan -> 127.0.0.1:8002"
+echo "  VLESS HTTP Upgrade  -> /hu-vless  -> 127.0.0.1:8003"
+echo
+echo "Test HU TLS on port 443 using the matching /hu-* path."
+echo "Backup: $BACKUP"
+echo "=================================================="
