@@ -114,42 +114,6 @@ Recommended for:
 
 ---
 
-## Default DNS
-
-DNS:
-- 1.1.1.1
-- 8.8.8.8
-
-Recommended for:
-- Maximum compatibility
-- Gaming
-- Raw performance
-- Minimal filtering
-
----
-
-# Supported Systems
-
-- Ubuntu
-- Debian
-- VPS Linux environments
-- systemd-resolved
-- resolvconf
-- static resolver systems
-- OpenSSH server environments
-
----
-
-# Notes
-
-- Run scripts as root or with sudo permission.
-- Scripts automatically detect resolver type where applicable.
-- Existing DNS configurations are backed up automatically.
-- DNS cache is flushed automatically after applying changes.
-- Root Login System automatically backs up SSH configuration before making changes.
-
----
-
 # Author
 
 GitHub:
