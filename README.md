@@ -94,26 +94,6 @@ wget -O mipv6 https://raw.githubusercontent.com/rewasu91/Management-System/refs/
 
 ---
 
-# DNS Profiles
-
-## ControlD Ads Blocking DNS
-
-Primary DNS:
-- 76.76.2.2
-- 76.76.10.2
-
-Fallback DNS:
-- 1.1.1.1
-- 8.8.8.8
-
-Recommended for:
-- Website ads blocking
-- Stable YouTube playback
-- Streaming compatibility
-- General browsing
-
----
-
 # Author
 
 GitHub:
