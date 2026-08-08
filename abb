@@ -1,0 +1,74 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+if [[ ${EUID:-$(id -u)} -ne 0 ]]; then
+  echo '[ERROR] Please run this patch as root.' >&2
+  exit 1
+fi
+
+if [[ ! -d /usr/local/rere ]]; then
+  echo '[ERROR] /usr/local/rere not found. KaizenSC does not appear to be installed.' >&2
+  exit 1
+fi
+
+BACKUP_DIR="/root/kaizensc-patch-backup-$(date +%Y%m%d-%H%M%S)"
+mkdir -p "$BACKUP_DIR"
+for f in /usr/local/rere/adjust-text-brightness /usr/local/rere/bot-menu; do
+  [[ -f "$f" ]] && cp -a "$f" "$BACKUP_DIR/"
+done
+
+if ! command -v python3 >/dev/null 2>&1; then
+  export DEBIAN_FRONTEND=noninteractive
+  apt-get update -y
+  apt-get install -y python3
+fi
+
+TMP=$(mktemp -d)
+trap 'rm -rf "$TMP"' EXIT
+base64 -d > "$TMP/payload.tar.gz" <<'PAYLOAD_EOF'
+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
+PAYLOAD_EOF
+
+tar -xzf "$TMP/payload.tar.gz" -C /
+chmod +x /usr/local/rere/adjust-text-brightness /usr/local/rere/bot-menu
+
+# Apply requested default/current mode across every KaizenSC text script.
+/usr/local/rere/adjust-text-brightness --apply normal
+
+# Validate the two replacement scripts and audit fixed ANSI sequences.
+bash -n /usr/local/rere/adjust-text-brightness
+bash -n /usr/local/rere/bot-menu
+python3 <<'PY'
+import os,re,sys
+root='/usr/local/rere'
+pat=re.compile(r'\\(?:e|033)\[([0-9;]+)(m)')
+bold=[]; dark=[]
+for base,_,files in os.walk(root):
+    for name in files:
+        p=os.path.join(base,name)
+        try:
+            data=open(p,'rb').read()
+            if b'\x00' in data: continue
+            text=data.decode('utf-8')
+        except Exception:
+            continue
+        for m in pat.finditer(text):
+            vals=[]
+            try: vals=[int(x or 0) for x in m.group(1).split(';')]
+            except ValueError: continue
+            if 1 in vals: bold.append((p,m.group(0)))
+            if vals[:3] == [38,5,240] or vals[:4] == [0,38,5,240]: dark.append((p,m.group(0)))
+if bold or dark:
+    print('[WARN] ANSI audit found remaining fixed sequences:')
+    print('  bold:', len(bold), 'dark-gray:', len(dark))
+    for item in (bold+dark)[:10]: print(' ', item[0], item[1])
+else:
+    print('[OK] All fixed KaizenSC ANSI colours are Normal / Not Bright; white uses non-bold 97.')
+PY
+
+echo
+echo '[OK] Patch installed successfully.'
+echo "[OK] Backup: $BACKUP_DIR"
+echo '[OK] Default/current text mode: Normal / Not Bright'
+echo '[OK] White: ANSI 0;97 (white, non-bold)'
+echo '[OK] Bot Manager updated; Coming Soon entries removed.'
