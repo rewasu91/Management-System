@@ -4,7 +4,7 @@ set -euo pipefail
 RERE='/usr/local/rere'
 TARGET="$RERE/menu-system"
 STAMP="$(date +%Y%m%d-%H%M%S)"
-BACKUP="/root/kaizensc-reinstall-password-backup-${STAMP}"
+BACKUP="/root/kaizensc-mreinstall-backup-${STAMP}"
 
 if [[ ${EUID:-$(id -u)} -ne 0 ]]; then
   echo "Please run this patch as root."
@@ -19,7 +19,7 @@ fi
 mkdir -p "$BACKUP"
 cp -a "$TARGET" "$BACKUP/menu-system"
 
-cat > "$TARGET" <<'__KAIZEN_MENU_SYSTEM_REINSTALL_PASSWORD__'
+cat > "$TARGET" <<'__KAIZEN_MENU_SYSTEM_MREINSTALL__'
 #!/usr/bin/env bash
 source /usr/local/rere/kaizen-ui 2>/dev/null || true
 RED='\e[0;31m'; GREEN='\e[0;32m'; YELLOW='\e[0;33m'; CYAN='\e[0;36m'; WHITE='\e[0;97m'; plain='\e[0m'; bgPutih='\e[0;47;30m'; keatas="${CYAN}│${plain}"
@@ -106,80 +106,50 @@ change_timezone(){
  done
 }
 
-download_reinstaller(){ cd /root || return 1; curl -fsSL -o reinstall.sh https://raw.githubusercontent.com/bin456789/reinstall/main/reinstall.sh || return 1; chmod +x reinstall.sh; }
-run_reinstall(){
- local distro=$1 version=${2:-} ok root_password root_password_confirm
+MREINSTALL_URL='https://raw.githubusercontent.com/rewasu91/Management-System/refs/heads/main/mreinstall'
+MREINSTALL_FILE='/root/mreinstall'
+
+rebuild_vps(){
  result_title 'REINSTALL / REBUILD VPS'
- echo -e "${RED}WARNING: Reinstalling the OS will erase the VPS system disk.${plain}"
- read -rp "Continue with ${distro}${version:+ $version}? Type YES: " ok
- [[ "$ok" == YES ]] || { echo -e "${YELLOW}Cancelled.${plain}"; return; }
-
- while true; do
-   echo
-   read -rsp "New Root Password: " root_password
-   echo
-   [[ -n "$root_password" ]] || {
-     echo -e "${RED}Root password cannot be empty.${plain}"
-     continue
-   }
-
-   read -rsp "Confirm Root Password: " root_password_confirm
-   echo
-   if [[ "$root_password" != "$root_password_confirm" ]]; then
-     echo -e "${RED}Passwords do not match. Please try again.${plain}"
-     continue
-   fi
-   break
- done
-
- echo
- echo -e "${WHITE}Root Username : ${GREEN}root${plain}"
- echo -e "${WHITE}Root Password : ${GREEN}[SET]${plain}"
+ echo -e "${WHITE}Downloading latest VPS reinstall manager...${plain}"
  echo
 
- download_reinstaller || {
-   echo -e "${RED}Failed to download reinstall.sh.${plain}"
-   unset root_password root_password_confirm
+ if ! curl -fL --retry 3 --retry-delay 2 --connect-timeout 10 --max-time 60 \
+   "$MREINSTALL_URL" -o "$MREINSTALL_FILE"; then
+   echo
+   echo -e "${RED}Failed to download VPS reinstall manager.${plain}"
+   echo -e "${WHITE}Source:${plain}"
+   echo -e "${CYAN}${MREINSTALL_URL}${plain}"
+   echo
+   read -rp 'Press Enter to continue...' _
    return
- }
-
- if [[ -n "$version" ]]; then
-   bash /root/reinstall.sh "$distro" "$version" --username root --password "$root_password"
- else
-   bash /root/reinstall.sh "$distro" --username root --password "$root_password"
  fi
 
- unset root_password root_password_confirm
-}
-choose_version(){
- local distro=$1 label=$2 versions=$3 arr choice; read -ra arr <<< "$versions"
- while true; do
-  header "$label VERSION"
-  local i; for i in "${!arr[@]}"; do printf "  ${CYAN}[%02d]${plain} ${WHITE}%s %s${plain}\n" "$((i+1))" "$label" "${arr[$i]}"; done
-  cmd; echo -e "  ${CYAN}[ x]${plain} ${WHITE}Back${plain}"; cmd; echo
-  read -rp " $(echo -e "${WHITE}Input Option:${plain} ")" choice
-  [[ "$choice" =~ ^[Xx]$ ]] && return
-  if [[ "$choice" =~ ^[0-9]+$ ]] && ((choice>=1 && choice<=${#arr[@]})); then run_reinstall "$distro" "${arr[$((choice-1))]}"; return; fi
-  invalid
- done
-}
-rebuild_vps(){
- while true; do
-  header 'REINSTALL / REBUILD VPS'
-  local items=('Debian' 'Ubuntu' 'Alpine' 'Rocky Linux' 'AlmaLinux' 'Oracle Linux' 'CentOS Stream' 'Anolis' 'openEuler' 'openSUSE' 'Fedora' 'OpenCloudOS' 'NixOS' 'Arch Linux' 'Gentoo Linux' 'Kali Linux' 'AOSC OS' 'fnOS' 'FygoOS' 'Red Hat (custom qcow2)')
-  local i; for i in "${!items[@]}"; do printf "  ${CYAN}[%02d]${plain} ${WHITE}%s${plain}\n" "$((i+1))" "${items[$i]}"; done
-  cmd; echo -e "  ${CYAN}[ x]${plain} ${WHITE}Back${plain}"; cmd; echo
-  read -rp " $(echo -e "${WHITE}Input Option:${plain} ")" o
-  case "$o" in
-   1|01) choose_version debian Debian '9 10 11 12 13';; 2|02) choose_version ubuntu Ubuntu '18.04 20.04 22.04 24.04 26.04';; 3|03) choose_version alpine Alpine '3.21 3.22 3.23 3.24';;
-   4|04) choose_version rocky 'Rocky Linux' '8 9 10';; 5|05) choose_version almalinux AlmaLinux '8 9 10';; 6|06) choose_version oracle 'Oracle Linux' '8 9 10';;
-   7|07) choose_version centos 'CentOS Stream' '9 10';; 8|08) choose_version anolis Anolis '7 8 23';; 9|09) choose_version openeuler openEuler '20.03 22.03 24.03';;
-   10) choose_version opensuse openSUSE '16.0 tumbleweed';; 11) choose_version fedora Fedora '43 44';; 12) choose_version opencloudos OpenCloudOS '8 9 23';;
-   13) run_reinstall nixos 26.05;; 14) run_reinstall arch;; 15) run_reinstall gentoo;; 16) run_reinstall kali;; 17) run_reinstall aosc;; 18) run_reinstall fnos 1;; 19) run_reinstall fygoos 1;;
-   20) result_title 'RED HAT CUSTOM IMAGE'; echo -e "${WHITE}Red Hat requires a qcow2 image URL from Red Hat.${plain}"; read -rp 'QCOW2 URL: ' img; [[ -n "$img" ]] && { download_reinstaller && bash /root/reinstall.sh redhat --img="$img"; };;
-   x|X) return;; *) invalid;;
-  esac
- done
+ if [[ ! -s "$MREINSTALL_FILE" ]]; then
+   echo -e "${RED}Downloaded reinstall manager is empty.${plain}"
+   rm -f "$MREINSTALL_FILE"
+   read -rp 'Press Enter to continue...' _
+   return
+ fi
+
+ chmod 700 "$MREINSTALL_FILE"
+
+ if ! bash -n "$MREINSTALL_FILE"; then
+   echo
+   echo -e "${RED}Downloaded reinstall manager failed Bash syntax validation.${plain}"
+   read -rp 'Press Enter to continue...' _
+   return
+ fi
+
+ clear
+ bash "$MREINSTALL_FILE"
+ local rc=$?
+
+ if (( rc != 0 )); then
+   echo
+   echo -e "${YELLOW}Reinstall manager exited with status ${rc}.${plain}"
+   read -rp 'Press Enter to continue...' _
+ fi
 }
 
 while true; do
@@ -211,7 +181,7 @@ while true; do
  esac
 done
 
-__KAIZEN_MENU_SYSTEM_REINSTALL_PASSWORD__
+__KAIZEN_MENU_SYSTEM_MREINSTALL__
 
 chmod 0755 "$TARGET"
 bash -n "$TARGET"
@@ -219,4 +189,5 @@ bash -n "$TARGET"
 echo
 echo "Patch installed successfully."
 echo "Backup: $BACKUP"
-echo "Reinstall / Rebuild VPS will now ask for a new root password after YES confirmation."
+echo "Reinstall / Rebuild VPS now uses:"
+echo "https://raw.githubusercontent.com/rewasu91/Management-System/refs/heads/main/mreinstall"
