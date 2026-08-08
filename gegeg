@@ -1,0 +1,25 @@
+#!/usr/bin/env bash
+set -euo pipefail
+F=/usr/local/rere/xray-account
+[[ -f "$F" ]] || { echo '[ERROR] /usr/local/rere/xray-account not found.'; exit 1; }
+B="/root/xray-extend-backup-$(date +%Y%m%d-%H%M%S)"
+mkdir -p "$B"
+cp -a "$F" "$B/xray-account"
+python3 - <<'PY'
+from pathlib import Path
+p=Path('/usr/local/rere/xray-account')
+s=p.read_text()
+old='''   now=$(date '+%F %T')\n   if [[ "$old" > "$now" ]]; then base="$old"; else base="$now"; fi\n   new=$(date -d "$base +$days days" '+%F %T') || return 1\n'''
+new='''   now=$(date '+%F %T')\n   local old_epoch now_epoch base_epoch new_epoch\n   old_epoch=$(date -d "$old" +%s 2>/dev/null) || { echo '[ERROR] Invalid current expiry date.'; return 1; }\n   now_epoch=$(date -d "$now" +%s 2>/dev/null) || return 1\n   if (( old_epoch > now_epoch )); then base_epoch=$old_epoch; else base_epoch=$now_epoch; fi\n   new_epoch=$((base_epoch + (days * 86400)))\n   new=$(date -d "@$new_epoch" '+%F %T') || return 1\n'''
+if old not in s:
+    if 'new_epoch=$((base_epoch + (days * 86400)))' in s:
+        print('[INFO] Extend fix already installed.')
+    else:
+        raise SystemExit('[ERROR] Expected extend block not found; no changes made.')
+else:
+    p.write_text(s.replace(old,new))
+PY
+chmod +x "$F"
+bash -n "$F"
+echo "[OK] Cumulative extend logic fixed. Backup: $B"
+echo '[INFO] Future expiry + N days now adds N days to the existing expiry.'
