@@ -1,0 +1,160 @@
+#!/usr/bin/env bash
+set -euo pipefail
+RERE=/usr/local/rere
+MENU="$RERE/menu-system"
+STAMP=$(date +%Y%m%d-%H%M%S)
+BACKUP="/root/kaizensc-streaming-patch-backup-$STAMP"
+[[ -f "$MENU" ]] || { echo "menu-system not found: $MENU"; exit 1; }
+mkdir -p "$BACKUP"
+cp -a "$MENU" "$BACKUP/menu-system"
+
+cat > "$RERE/check-streaming-country" <<'KAIZEN_STREAM'
+#!/usr/bin/env bash
+source /usr/local/rere/kaizen-ui 2>/dev/null || true
+RED='\e[0;31m'; GREEN='\e[0;32m'; YELLOW='\e[0;33m'; MAGENTA='\e[0;35m'; CYAN='\e[0;36m'; WHITE='\e[0;97m'; plain='\e[0m'
+
+header(){
+  clear
+  if declare -F kaizen_header >/dev/null; then
+    kaizen_header " • CHECK STREAMING COUNTRY STATUS • "
+  else
+    echo -e "${CYAN}=== CHECK STREAMING COUNTRY STATUS ===${plain}"
+  fi
+}
+value(){ printf '%b%s%b' "$GREEN" "$1" "$plain"; }
+fail(){ printf '%b%s%b' "$RED" "$1" "$plain"; }
+
+fetch_json(){
+  local url="$1" family="${2:-4}"
+  curl -"$family" -fsS --connect-timeout 5 --max-time 10 -A 'Mozilla/5.0 KaizenSC' "$url" 2>/dev/null || true
+}
+json_get(){
+  local json="$1" key="$2"
+  if command -v jq >/dev/null 2>&1; then
+    printf '%s' "$json" | jq -r --arg k "$key" '.[$k] // empty' 2>/dev/null
+  else
+    python3 - "$key" <<<"$json" 2>/dev/null <<'PY'
+import json,sys
+key=sys.argv[1]
+try:
+    d=json.load(sys.stdin)
+    v=d.get(key,"")
+    print(v if v is not None else "")
+except Exception:
+    pass
+PY
+  fi
+}
+country_code(){
+  local family="$1" j c
+  j=$(fetch_json 'https://ipwho.is/' "$family")
+  c=$(json_get "$j" country_code)
+  [[ -n "$c" ]] || c='-'
+  printf '%s' "$c"
+}
+print_ip_info(){
+  local family="$1" j ip country region city isp
+  j=$(fetch_json 'https://ipwho.is/' "$family")
+  if [[ -z "$j" ]]; then
+    echo -e "${RED}Unable to retrieve IPv${family} information.${plain}"
+    return 1
+  fi
+  ip=$(json_get "$j" ip); country=$(json_get "$j" country); region=$(json_get "$j" region); city=$(json_get "$j" city)
+  if command -v jq >/dev/null 2>&1; then
+    isp=$(printf '%s' "$j" | jq -r '.connection.isp // .connection.org // empty' 2>/dev/null)
+  else
+    isp=''
+  fi
+  printf "${WHITE}%-12s : ${GREEN}%s${plain}\n" "IP" "${ip:--}"
+  printf "${WHITE}%-12s : ${GREEN}%s${plain}\n" "Country" "${country:--}"
+  printf "${WHITE}%-12s : ${GREEN}%s${plain}\n" "Region" "${region:--}"
+  printf "${WHITE}%-12s : ${GREEN}%s${plain}\n" "City" "${city:--}"
+  printf "${WHITE}%-12s : ${GREEN}%s${plain}\n" "ISP" "${isp:--}"
+}
+http_code(){
+  local family="$1" url="$2"
+  curl -"$family" -LksS -o /dev/null --connect-timeout 5 --max-time 12 -A 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124 Safari/537.36' -w '%{http_code}' "$url" 2>/dev/null || printf '000'
+}
+show_service(){
+  local label="$1" url="$2" family="$3" code cc
+  code=$(http_code "$family" "$url"); cc=$(country_code "$family")
+  case "$code" in
+    200|201|202|204|301|302|303|307|308)
+      printf "${WHITE}%-16s : ${GREEN}Yes (Region: %s)${plain}\n" "$label" "$cc" ;;
+    000)
+      printf "${WHITE}%-16s : ${RED}No / Connection Failed${plain}\n" "$label" ;;
+    *)
+      printf "${WHITE}%-16s : ${YELLOW}Check Required (HTTP %s, Region: %s)${plain}\n" "$label" "$code" "$cc" ;;
+  esac
+}
+
+header
+echo -e "${MAGENTA}-- IPV4 --${plain}"
+print_ip_info 4
+echo
+echo -e "${MAGENTA}-- Global --${plain}"
+show_service 'Netflix' 'https://www.netflix.com/title/81215567' 4
+show_service 'HotStar' 'https://www.hotstar.com/' 4
+show_service 'YouTube' 'https://www.youtube.com/premium' 4
+show_service 'iQiyi Global' 'https://www.iq.com/' 4
+show_service 'Viu.com' 'https://www.viu.com/' 4
+show_service 'Astro GO' 'https://astrogo.astro.com.my/' 4
+echo
+echo -e "${MAGENTA}-- IPV6 --${plain}"
+if ip -6 route show default 2>/dev/null | grep -q .; then
+  print_ip_info 6 || true
+else
+  echo -e "${YELLOW}IPv6 is not available on this VPS.${plain}"
+fi
+echo
+echo -e "${GREEN}Finished Test${plain}"
+echo
+read -n1 -s -r -p "$(echo -e "${GREEN}Press any key to continue...${plain}")"
+echo
+
+KAIZEN_STREAM
+chmod +x "$RERE/check-streaming-country"
+
+python3 - "$MENU" <<'PY'
+from pathlib import Path
+import sys,re
+p=Path(sys.argv[1]); s=p.read_text()
+
+if 'Check Streaming Country Status' not in s:
+    # Renumber existing displayed entries >=06
+    def ren(m):
+        n=int(m.group(1))
+        return f'[{n+1:02d}]' if n>=6 else m.group(0)
+    # only menu display lines in the main while block
+    marker="while true; do\n header 'MENU SYSTEM VPS'"
+    pos=s.find(marker)
+    if pos<0: raise SystemExit('Unable to locate MENU SYSTEM VPS block')
+    head,tail=s[:pos],s[pos:]
+    display_end=tail.find(' cmd; echo -e "  ${CYAN}[ x]')
+    block,rest=tail[:display_end],tail[display_end:]
+    block=re.sub(r'\[(\d{2})\]', ren, block)
+    anchor=' echo -e "  ${CYAN}[05]${plain} ${WHITE}Adjust Text Brightness${plain}"\n'
+    if anchor not in block: raise SystemExit('Unable to locate menu option 05')
+    block=block.replace(anchor,anchor+' echo -e "  ${CYAN}[06]${plain} ${WHITE}Check Streaming Country Status${plain}"\n',1)
+    tail=block+rest
+    s=head+tail
+
+    # Prompt maximum
+    s=s.replace('Please select an option [01-15 or x]:','Please select an option [01-16 or x]:')
+
+    # Shift case destinations by matching known current v14 sequence
+    old="""  5|05) adjust-text-brightness; exec menu-system;; 6|06) bot-menu;; 7|07) rebuild_vps;; 8|08) detail; read -rp 'Press Enter to continue...' _;; 9|09) system_status; read -rp 'Press Enter to continue...' _;;
+  10) menu-argo;; 11) change_banner; read -rp 'Press Enter to continue...' _;; 12) fn-sc1;; 13) menu-api;; 14) menu-admin;; 15) exec menu;;"""
+    new="""  5|05) adjust-text-brightness; exec menu-system;; 6|06) check-streaming-country;; 7|07) bot-menu;; 8|08) rebuild_vps;; 9|09) detail; read -rp 'Press Enter to continue...' _;;
+  10) system_status; read -rp 'Press Enter to continue...' _;; 11) menu-argo;; 12) change_banner; read -rp 'Press Enter to continue...' _;; 13) fn-sc1;; 14) menu-api;; 15) menu-admin;; 16) exec menu;;"""
+    if old not in s: raise SystemExit('Menu case layout differs from expected latest KaizenSC; no unsafe patch applied.')
+    s=s.replace(old,new,1)
+
+p.write_text(s)
+PY
+
+bash -n "$MENU"
+bash -n "$RERE/check-streaming-country"
+echo "Installed successfully."
+echo "Backup: $BACKUP"
+echo "System VPS [06] = Check Streaming Country Status"
