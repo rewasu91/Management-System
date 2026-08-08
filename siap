@@ -1,0 +1,118 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+if [[ ${EUID:-$(id -u)} -ne 0 ]]; then
+  echo "[ERROR] Run this script as root."
+  exit 1
+fi
+
+STAMP=$(date +%Y%m%d-%H%M%S)
+BACKUP="/root/kaizensc-rename-backup-$STAMP"
+mkdir -p "$BACKUP"
+
+echo "[INFO] Backup: $BACKUP"
+for p in /etc/funny /etc/kaizensc /etc/haproxy/haproxy.cfg /etc/haproxy/funny.pem /etc/haproxy/kaizensc.pem /etc/nginx /etc/systemd/system /usr/local/rere; do
+  [[ -e "$p" ]] && cp -a "$p" "$BACKUP/" 2>/dev/null || true
+done
+
+# Stop components that may actively read the old paths while moving the tree.
+for s in xray-vless xray-vmess xray-trojan nginx haproxy dnstt ws-stunnel; do
+  systemctl stop "$s" 2>/dev/null || true
+done
+
+if [[ -d /etc/funny && ! -e /etc/kaizensc ]]; then
+  mv /etc/funny /etc/kaizensc
+elif [[ -d /etc/funny && -d /etc/kaizensc ]]; then
+  echo "[INFO] Both /etc/funny and /etc/kaizensc exist; merging old data into /etc/kaizensc."
+  cp -a /etc/funny/. /etc/kaizensc/
+  mv /etc/funny "$BACKUP/funny.old"
+fi
+mkdir -p /etc/kaizensc
+
+# HAProxy combined certificate filename.
+if [[ -f /etc/haproxy/funny.pem && ! -f /etc/haproxy/kaizensc.pem ]]; then
+  mv /etc/haproxy/funny.pem /etc/haproxy/kaizensc.pem
+fi
+
+# Patch only configuration/script text files; databases and user content are not rewritten.
+patch_tree() {
+  local root="$1"
+  [[ -e "$root" ]] || return 0
+  while IFS= read -r -d '' f; do
+    if grep -Iq . "$f" 2>/dev/null; then
+      sed -i \
+        -e 's#/etc/funny#/etc/kaizensc#g' \
+        -e 's#funny\.pem#kaizensc.pem#g' \
+        "$f" 2>/dev/null || true
+    fi
+  done < <(find "$root" -type f -print0 2>/dev/null)
+}
+
+patch_tree /etc/kaizensc
+patch_tree /usr/local/rere
+patch_tree /etc/systemd/system
+patch_tree /etc/nginx
+patch_tree /etc/haproxy
+patch_tree /etc/cron.d
+
+for f in /etc/crontab /root/.bashrc /root/.profile /etc/profile; do
+  if [[ -f "$f" ]] && grep -Iq . "$f"; then
+    sed -i -e 's#/etc/funny#/etc/kaizensc#g' -e 's#funny\.pem#kaizensc.pem#g' "$f" || true
+  fi
+done
+
+# Ensure the HAProxy PEM exists under the new name when certs are available.
+if [[ ! -s /etc/haproxy/kaizensc.pem && -s /etc/xray/xray.crt && -s /etc/xray/xray.key ]]; then
+  cat /etc/xray/xray.crt /etc/xray/xray.key > /etc/haproxy/kaizensc.pem
+  chmod 600 /etc/haproxy/kaizensc.pem
+fi
+
+systemctl daemon-reload
+
+# Validate Xray confdirs if present.
+XRAY_BIN=""
+for x in /usr/local/xray-new/xray /usr/local/bin/xray /usr/local/rere/xray; do
+  [[ -x "$x" ]] && XRAY_BIN="$x" && break
+done
+if [[ -n "$XRAY_BIN" ]]; then
+  for p in vless vmess trojan; do
+    if [[ -d "/etc/kaizensc/xray/$p" ]]; then
+      echo "[INFO] Validating Xray $p..."
+      "$XRAY_BIN" run -test -confdir "/etc/kaizensc/xray/$p"
+    fi
+  done
+fi
+
+if command -v nginx >/dev/null 2>&1; then
+  echo "[INFO] Validating Nginx..."
+  nginx -t
+fi
+if command -v haproxy >/dev/null 2>&1 && [[ -f /etc/haproxy/haproxy.cfg ]]; then
+  echo "[INFO] Validating HAProxy..."
+  haproxy -c -f /etc/haproxy/haproxy.cfg
+fi
+
+for s in xray-vless xray-vmess xray-trojan nginx haproxy dnstt ws-stunnel; do
+  systemctl restart "$s" 2>/dev/null || true
+done
+
+remaining=0
+for root in /etc/kaizensc /usr/local/rere /etc/systemd/system /etc/nginx /etc/haproxy; do
+  [[ -e "$root" ]] || continue
+  c=$(grep -RIl '/etc/funny\|funny\.pem' "$root" 2>/dev/null | wc -l || true)
+  remaining=$((remaining+c))
+done
+
+if [[ -e /etc/funny ]]; then
+  echo "[WARN] /etc/funny still exists. It was not removed because both trees existed during migration."
+fi
+
+if (( remaining > 0 )); then
+  echo "[WARN] Found $remaining text file(s) still containing an old /etc/funny or funny.pem reference."
+else
+  echo "[OK] No runtime /etc/funny or funny.pem references remain."
+fi
+
+echo "[OK] Main directory: /etc/kaizensc"
+echo "[OK] Xray config: /etc/kaizensc/xray/{vless,vmess,trojan}/"
+echo "[OK] Backup kept at: $BACKUP"
