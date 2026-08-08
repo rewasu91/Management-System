@@ -1,0 +1,62 @@
+#!/usr/bin/env bash
+set -euo pipefail
+BASE=/etc/funny/xray
+XRAY_BIN=/usr/local/xray-new/xray
+BACKUP="/root/xray-inbound-tags-backup-$(date +%Y%m%d-%H%M%S)"
+mkdir -p "$BACKUP"
+
+for p in vless vmess trojan; do
+  f="$BASE/$p/inbounds.json"
+  [[ -f "$f" ]] || { echo "[ERROR] Missing $f"; exit 1; }
+  mkdir -p "$BACKUP/$p"
+  cp -a "$f" "$BACKUP/$p/inbounds.json"
+
+done
+
+echo "[INFO] Backup: $BACKUP"
+
+python3 - <<'PY'
+import json
+base='/etc/funny/xray'
+for p in ('vless','vmess','trojan'):
+    path=f'{base}/{p}/inbounds.json'
+    with open(path) as f:
+        data=json.load(f)
+    for ib in data.get('inbounds',[]):
+        if ib.get('protocol') == 'dokodemo-door' or ib.get('tag') == 'api':
+            ib['tag']='api'
+            continue
+        net=(ib.get('streamSettings') or {}).get('network','')
+        mapping={'ws':'ws','httpupgrade':'hu','xhttp':'xhttp','grpc':'grpc','tcp':'tcp'}
+        suffix=mapping.get(net, net or str(ib.get('port','in')))
+        ib['tag']=f'{p}-{suffix}'
+    with open(path,'w') as f:
+        json.dump(data,f,indent=2)
+        f.write('\n')
+PY
+
+mkdir -p /var/log/xray
+for p in vless vmess trojan; do
+  echo "[INFO] Validating $p confdir..."
+  "$XRAY_BIN" run -test -confdir "$BASE/$p" >/tmp/xray-$p-tagfix.log 2>&1 || {
+    cat /tmp/xray-$p-tagfix.log
+    echo "[ERROR] $p validation failed. Restoring backup..."
+    cp -a "$BACKUP/$p/inbounds.json" "$BASE/$p/inbounds.json"
+    exit 1
+  }
+  count=$(jq '[.inbounds[] | select(.protocol != "dokodemo-door")] | length' "$BASE/$p/inbounds.json")
+  uniq=$(jq -r '.inbounds[] | .tag // empty' "$BASE/$p/inbounds.json" | sort -u | wc -l)
+  echo "[OK] $p: $count transport inbounds, $uniq unique tags"
+done
+
+systemctl daemon-reload
+systemctl restart xray-vless xray-vmess xray-trojan
+sleep 2
+for s in xray-vless xray-vmess xray-trojan; do
+  if systemctl is-active --quiet "$s"; then echo "[OK] $s active"; else echo "[ERROR] $s failed"; systemctl --no-pager -l status "$s" || true; exit 1; fi
+done
+
+echo
+printf '%s\n' '[OK] Fixed confdir inbound tag collision.'
+printf '%s\n' '[OK] WS / HTTPUpgrade / XHTTP / gRPC / TCP now remain separate in merged Xray config.'
+printf '%s\n' '[INFO] Test ports 80 and 443 again.'
