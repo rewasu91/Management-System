@@ -1,0 +1,102 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+XRAY_BIN=/usr/local/xray-new/xray
+BASE=/etc/funny
+STAMP=$(date +%Y%m%d-%H%M%S)
+BACKUP="/root/xray-confdir-backup-$STAMP"
+
+[[ $EUID -eq 0 ]] || { echo '[ERROR] Run as root.'; exit 1; }
+command -v jq >/dev/null || { echo '[ERROR] jq is required.'; exit 1; }
+[[ -x "$XRAY_BIN" ]] || { echo "[ERROR] Xray binary not found: $XRAY_BIN"; exit 1; }
+
+mkdir -p "$BACKUP"
+cp -a /etc/funny/json "$BACKUP/" 2>/dev/null || true
+cp -a /etc/xray "$BACKUP/xray" 2>/dev/null || true
+cp -a /usr/local/rere/xray-account "$BACKUP/" 2>/dev/null || true
+cp -a /usr/local/rere/xray-setup "$BACKUP/" 2>/dev/null || true
+for p in vless vmess trojan; do
+  cp -a "/etc/systemd/system/xray-$p.service" "$BACKUP/" 2>/dev/null || true
+done
+
+echo "[INFO] Backup: $BACKUP"
+
+for p in vless vmess trojan; do
+  src="$BASE/json/$p.json"
+  dst="/etc/xray/$p"
+  [[ -f "$src" ]] || { echo "[ERROR] Missing $src"; exit 1; }
+  mkdir -p "$dst"
+  jq '{inbounds:(.inbounds // [])}' "$src" > "$dst/10-inbounds.json"
+  jq '{outbounds:(.outbounds // [])}' "$src" > "$dst/20-outbounds.json"
+  jq '{routing:(.routing // {})}' "$src" > "$dst/30-routing.json"
+  jq '{log,api,stats,dns,policy} | with_entries(select(.value != null))' "$src" > "$dst/40-core.json"
+  chmod 644 "$dst"/*.json
+
+done
+
+# Account management must modify the inbound file only.
+python3 - <<'PY'
+p='/usr/local/rere/xray-account'
+s=open(p).read()
+old='json(){ echo "$BASE/json/$1.json"; }'
+new='json(){ echo "/etc/xray/$1/10-inbounds.json"; }'
+if old in s:
+    s=s.replace(old,new)
+elif new not in s:
+    raise SystemExit('[ERROR] Could not locate xray-account json() helper.')
+open(p,'w').write(s)
+PY
+
+# Service startup uses confdir.
+for p in vless vmess trojan; do
+  svc="/etc/systemd/system/xray-$p.service"
+  sed -i -E "s#ExecStart=.*xray run .*#ExecStart=$XRAY_BIN run -confdir /etc/xray/$p#" "$svc"
+done
+
+# Setup validator uses confdir as well.
+if [[ -f /usr/local/rere/xray-setup ]]; then
+  sed -i 's#run -test -config /etc/funny/json/vless.json#run -test -confdir /etc/xray/vless#g; s#run -test -config /etc/funny/json/vmess.json#run -test -confdir /etc/xray/vmess#g; s#run -test -config /etc/funny/json/trojan.json#run -test -confdir /etc/xray/trojan#g' /usr/local/rere/xray-setup
+fi
+
+bash -n /usr/local/rere/xray-account
+[[ ! -f /usr/local/rere/xray-setup ]] || bash -n /usr/local/rere/xray-setup
+
+for p in vless vmess trojan; do
+  echo "[INFO] Validating $p confdir..."
+  "$XRAY_BIN" run -test -confdir "/etc/xray/$p"
+done
+
+systemctl daemon-reload
+for p in vless vmess trojan; do systemctl restart "xray-$p"; done
+
+for p in vless vmess trojan; do
+  if systemctl is-active --quiet "xray-$p"; then
+    echo "[OK] xray-$p is active"
+  else
+    echo "[ERROR] xray-$p failed after migration. Backup: $BACKUP"
+    systemctl --no-pager -l status "xray-$p" || true
+    exit 1
+  fi
+done
+
+# Keep old monolithic files only as clearly named legacy copies; Xray no longer reads them.
+mkdir -p /etc/funny/json/legacy
+for p in vless vmess trojan; do
+  [[ -f "$BASE/json/$p.json" ]] && mv "$BASE/json/$p.json" "$BASE/json/legacy/$p.json.pre-confdir-$STAMP"
+done
+
+echo
+cat <<'TXT'
+[OK] Xray 4-file confdir migration completed.
+
+Config layout:
+  /etc/xray/vless/{10-inbounds,20-outbounds,30-routing,40-core}.json
+  /etc/xray/vmess/{10-inbounds,20-outbounds,30-routing,40-core}.json
+  /etc/xray/trojan/{10-inbounds,20-outbounds,30-routing,40-core}.json
+
+Routing example:
+  nano /etc/xray/vless/30-routing.json
+
+Outbounds example:
+  nano /etc/xray/vless/20-outbounds.json
+TXT
