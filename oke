@@ -1,0 +1,222 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+RERE='/usr/local/rere'
+TARGET="$RERE/menu-system"
+STAMP="$(date +%Y%m%d-%H%M%S)"
+BACKUP="/root/kaizensc-reinstall-password-backup-${STAMP}"
+
+if [[ ${EUID:-$(id -u)} -ne 0 ]]; then
+  echo "Please run this patch as root."
+  exit 1
+fi
+
+[[ -f "$TARGET" ]] || {
+  echo "KaizenSC menu-system not found: $TARGET"
+  exit 1
+}
+
+mkdir -p "$BACKUP"
+cp -a "$TARGET" "$BACKUP/menu-system"
+
+cat > "$TARGET" <<'__KAIZEN_MENU_SYSTEM_REINSTALL_PASSWORD__'
+#!/usr/bin/env bash
+source /usr/local/rere/kaizen-ui 2>/dev/null || true
+RED='\e[0;31m'; GREEN='\e[0;32m'; YELLOW='\e[0;33m'; CYAN='\e[0;36m'; WHITE='\e[0;97m'; plain='\e[0m'; bgPutih='\e[0;47;30m'; keatas="${CYAN}│${plain}"
+cmd(){ printf '  '; local i; for i in {52..57} {57..52}; do printf "\e[38;5;${i}m────\e[0m"; done; echo; }
+invalid(){ echo; echo -e "${RED}Invalid option, please try again!${plain}"; sleep 1; }
+header(){ clear; echo; if declare -F kaizen_header >/dev/null; then kaizen_header " • $1 • "; else echo -e "${CYAN}┌─────────────────────────────────────────────────┐${plain}"; printf "${CYAN}│${plain}${bgPutih}%49s${plain}${CYAN}│${plain}\n" " $1"; echo -e "${CYAN}└─────────────────────────────────────────────────┘${plain}"; fi; }
+result_title(){ header "$1"; }
+
+change_banner(){
+ result_title 'CHANGE SSH BANNER'
+ read -rp 'Input your SSH banner: ' bns
+ printf '%s\n' "$bns" > /etc/issue.net
+ systemctl daemon-reload
+ for s in ssh sshd dropbear ws-stunnel multiplex ws-dual; do systemctl cat "$s" >/dev/null 2>&1 && systemctl restart "$s" >/dev/null 2>&1 || true; done
+ echo -e "${GREEN}SSH banner updated successfully.${plain}"
+}
+
+system_status(){
+ result_title 'SYSTEM STATUS'
+ local uptime_text cpu_load ram_total ram_used ram_pct disk_total disk_used disk_pct
+ uptime_text=$(uptime -p 2>/dev/null | sed 's/^up //' || echo '-')
+ cpu_load=$(awk '{print $1" / "$2" / "$3}' /proc/loadavg 2>/dev/null || echo '-')
+ ram_total=$(free -m | awk '/^Mem:/ {print $2}')
+ ram_used=$(free -m | awk '/^Mem:/ {print $3}')
+ if [[ ${ram_total:-0} -gt 0 ]]; then ram_pct=$((ram_used*100/ram_total)); else ram_pct=0; fi
+ read -r disk_total disk_used disk_pct < <(df -h / | awk 'NR==2 {print $2, $3, $5}')
+ echo -e "${WHITE}  Uptime      : ${GREEN}${uptime_text:-'-'}${plain}"
+ echo -e "${WHITE}  CPU Load    : ${GREEN}${cpu_load:-'-'}${plain}"
+ echo -e "${WHITE}  RAM Usage   : ${GREEN}${ram_used:-0} MB / ${ram_total:-0} MB (${ram_pct}%)${plain}"
+ echo -e "${WHITE}  SSD Usage   : ${GREEN}${disk_used:-'-'} / ${disk_total:-'-'} (${disk_pct:-'-'})${plain}"
+ echo -e "${WHITE}  CPU Cores   : ${GREEN}$(nproc 2>/dev/null || echo '-')${plain}"
+ echo -e "${WHITE}  Kernel      : ${GREEN}$(uname -r)${plain}"
+}
+
+restart_all(){
+ result_title 'RESTART ALL SERVICE'
+ echo -e "${WHITE}Restarting installed services...${plain}"; echo
+ services=(ssh sshd dropbear multiplex ws-stunnel ws-dual cron xray-vless xray-vmess xray-trojan haproxy sslh nginx openvpn noobzvpns dnstt udp-custom api v2ray xray-quota@vless xray-quota@vmess xray-quota@trojan)
+ for s in "${services[@]}"; do
+   if systemctl cat "$s" >/dev/null 2>&1; then
+     if systemctl restart "$s" >/dev/null 2>&1; then printf "${GREEN}[OK]${plain}   ${WHITE}%s${plain}\n" "$s"; else printf "${RED}[FAIL]${plain} ${WHITE}%s${plain}\n" "$s"; fi
+   fi
+ done
+ [[ -f /etc/xray/domargo ]] && systemctl cat cloudflared >/dev/null 2>&1 && systemctl restart cloudflared >/dev/null 2>&1 || true
+}
+
+choose_region(){
+ local region=$1 zones choice
+ mapfile -t zones < <(timedatectl list-timezones | grep -E "^${region}/")
+ ((${#zones[@]}>0)) || { result_title 'CHANGE TIMEZONE'; echo -e "${RED}No timezone found.${plain}"; return; }
+ while true; do
+   header "${region} TIMEZONES"
+   local i; for i in "${!zones[@]}"; do printf "  ${CYAN}[%02d]${plain} ${WHITE}%s${plain}\n" "$((i+1))" "${zones[$i]}"; done
+   cmd; echo -e "  ${CYAN}[ x]${plain} ${WHITE}Back${plain}"; cmd; echo
+   read -rp " $(echo -e "${WHITE}Select timezone:${plain} ")" choice
+   [[ "$choice" =~ ^[Xx]$ ]] && return
+   if [[ "$choice" =~ ^[0-9]+$ ]] && ((choice>=1 && choice<=${#zones[@]})); then
+     timedatectl set-timezone "${zones[$((choice-1))]}" && { result_title 'TIMEZONE UPDATED'; echo -e "${GREEN}Timezone changed to ${zones[$((choice-1))]}.${plain}"; }; return
+   fi
+   invalid
+ done
+}
+
+change_timezone(){
+ while true; do
+  header 'CHANGE TIMEZONE'
+  echo -e "  ${CYAN}[01]${plain} ${WHITE}Africa${plain}"
+  echo -e "  ${CYAN}[02]${plain} ${WHITE}America${plain}"
+  echo -e "  ${CYAN}[03]${plain} ${WHITE}Antarctica${plain}"
+  echo -e "  ${CYAN}[04]${plain} ${WHITE}Asia${plain}"
+  echo -e "  ${CYAN}[05]${plain} ${WHITE}Atlantic${plain}"
+  echo -e "  ${CYAN}[06]${plain} ${WHITE}Australia${plain}"
+  echo -e "  ${CYAN}[07]${plain} ${WHITE}Europe${plain}"
+  echo -e "  ${CYAN}[08]${plain} ${WHITE}Indian${plain}"
+  echo -e "  ${CYAN}[09]${plain} ${WHITE}Pacific${plain}"
+  echo -e "  ${CYAN}[10]${plain} ${WHITE}View Current Time Zone${plain}"
+  cmd; echo -e "  ${CYAN}[ x]${plain} ${WHITE}Back${plain}"; cmd; echo
+  read -rp " $(echo -e "${WHITE}Please select an option [01-10 or x]:${plain} ")" opt
+  case "$opt" in
+   1|01) choose_region Africa;; 2|02) choose_region America;; 3|03) choose_region Antarctica;; 4|04) choose_region Asia;;
+   5|05) choose_region Atlantic;; 6|06) choose_region Australia;; 7|07) choose_region Europe;; 8|08) choose_region Indian;; 9|09) choose_region Pacific;;
+   10) result_title 'CURRENT TIMEZONE'; timedatectl; read -rp 'Press Enter to continue...' _;; x|X) return;; *) invalid;;
+  esac
+ done
+}
+
+download_reinstaller(){ cd /root || return 1; curl -fsSL -o reinstall.sh https://raw.githubusercontent.com/bin456789/reinstall/main/reinstall.sh || return 1; chmod +x reinstall.sh; }
+run_reinstall(){
+ local distro=$1 version=${2:-} ok root_password root_password_confirm
+ result_title 'REINSTALL / REBUILD VPS'
+ echo -e "${RED}WARNING: Reinstalling the OS will erase the VPS system disk.${plain}"
+ read -rp "Continue with ${distro}${version:+ $version}? Type YES: " ok
+ [[ "$ok" == YES ]] || { echo -e "${YELLOW}Cancelled.${plain}"; return; }
+
+ while true; do
+   echo
+   read -rsp "New Root Password: " root_password
+   echo
+   [[ -n "$root_password" ]] || {
+     echo -e "${RED}Root password cannot be empty.${plain}"
+     continue
+   }
+
+   read -rsp "Confirm Root Password: " root_password_confirm
+   echo
+   if [[ "$root_password" != "$root_password_confirm" ]]; then
+     echo -e "${RED}Passwords do not match. Please try again.${plain}"
+     continue
+   fi
+   break
+ done
+
+ echo
+ echo -e "${WHITE}Root Username : ${GREEN}root${plain}"
+ echo -e "${WHITE}Root Password : ${GREEN}[SET]${plain}"
+ echo
+
+ download_reinstaller || {
+   echo -e "${RED}Failed to download reinstall.sh.${plain}"
+   unset root_password root_password_confirm
+   return
+ }
+
+ if [[ -n "$version" ]]; then
+   bash /root/reinstall.sh "$distro" "$version" --username root --password "$root_password"
+ else
+   bash /root/reinstall.sh "$distro" --username root --password "$root_password"
+ fi
+
+ unset root_password root_password_confirm
+}
+choose_version(){
+ local distro=$1 label=$2 versions=$3 arr choice; read -ra arr <<< "$versions"
+ while true; do
+  header "$label VERSION"
+  local i; for i in "${!arr[@]}"; do printf "  ${CYAN}[%02d]${plain} ${WHITE}%s %s${plain}\n" "$((i+1))" "$label" "${arr[$i]}"; done
+  cmd; echo -e "  ${CYAN}[ x]${plain} ${WHITE}Back${plain}"; cmd; echo
+  read -rp " $(echo -e "${WHITE}Input Option:${plain} ")" choice
+  [[ "$choice" =~ ^[Xx]$ ]] && return
+  if [[ "$choice" =~ ^[0-9]+$ ]] && ((choice>=1 && choice<=${#arr[@]})); then run_reinstall "$distro" "${arr[$((choice-1))]}"; return; fi
+  invalid
+ done
+}
+rebuild_vps(){
+ while true; do
+  header 'REINSTALL / REBUILD VPS'
+  local items=('Debian' 'Ubuntu' 'Alpine' 'Rocky Linux' 'AlmaLinux' 'Oracle Linux' 'CentOS Stream' 'Anolis' 'openEuler' 'openSUSE' 'Fedora' 'OpenCloudOS' 'NixOS' 'Arch Linux' 'Gentoo Linux' 'Kali Linux' 'AOSC OS' 'fnOS' 'FygoOS' 'Red Hat (custom qcow2)')
+  local i; for i in "${!items[@]}"; do printf "  ${CYAN}[%02d]${plain} ${WHITE}%s${plain}\n" "$((i+1))" "${items[$i]}"; done
+  cmd; echo -e "  ${CYAN}[ x]${plain} ${WHITE}Back${plain}"; cmd; echo
+  read -rp " $(echo -e "${WHITE}Input Option:${plain} ")" o
+  case "$o" in
+   1|01) choose_version debian Debian '9 10 11 12 13';; 2|02) choose_version ubuntu Ubuntu '18.04 20.04 22.04 24.04 26.04';; 3|03) choose_version alpine Alpine '3.21 3.22 3.23 3.24';;
+   4|04) choose_version rocky 'Rocky Linux' '8 9 10';; 5|05) choose_version almalinux AlmaLinux '8 9 10';; 6|06) choose_version oracle 'Oracle Linux' '8 9 10';;
+   7|07) choose_version centos 'CentOS Stream' '9 10';; 8|08) choose_version anolis Anolis '7 8 23';; 9|09) choose_version openeuler openEuler '20.03 22.03 24.03';;
+   10) choose_version opensuse openSUSE '16.0 tumbleweed';; 11) choose_version fedora Fedora '43 44';; 12) choose_version opencloudos OpenCloudOS '8 9 23';;
+   13) run_reinstall nixos 26.05;; 14) run_reinstall arch;; 15) run_reinstall gentoo;; 16) run_reinstall kali;; 17) run_reinstall aosc;; 18) run_reinstall fnos 1;; 19) run_reinstall fygoos 1;;
+   20) result_title 'RED HAT CUSTOM IMAGE'; echo -e "${WHITE}Red Hat requires a qcow2 image URL from Red Hat.${plain}"; read -rp 'QCOW2 URL: ' img; [[ -n "$img" ]] && { download_reinstaller && bash /root/reinstall.sh redhat --img="$img"; };;
+   x|X) return;; *) invalid;;
+  esac
+ done
+}
+
+while true; do
+ header 'MENU SYSTEM VPS'
+ echo -e "  ${CYAN}[01]${plain} ${WHITE}Domain Manager${plain}"
+ echo -e "  ${CYAN}[02]${plain} ${WHITE}Backup Manager${plain}"
+ echo -e "  ${CYAN}[03]${plain} ${WHITE}Change Timezone${plain}"
+ echo -e "  ${CYAN}[04]${plain} ${WHITE}Restart All Service${plain}"
+ echo -e "  ${CYAN}[05]${plain} ${WHITE}Adjust Text Brightness${plain}"
+ echo -e "  ${CYAN}[06]${plain} ${WHITE}Check Streaming Country Status${plain}"
+ echo -e "  ${CYAN}[07]${plain} ${WHITE}Menu Bot Manager${plain}"
+ echo -e "  ${CYAN}[08]${plain} ${WHITE}ON/OFF IPV6${plain}"
+ echo -e "  ${CYAN}[09]${plain} ${WHITE}Reinstall / Rebuild VPS${plain}"
+ echo -e "  ${CYAN}[10]${plain} ${WHITE}Check Detail Port & Protocol${plain}"
+ echo -e "  ${CYAN}[11]${plain} ${WHITE}Check Status: Uptime, CPU, RAM & SSD${plain}"
+ echo -e "  ${CYAN}[12]${plain} ${WHITE}Setup Cloudflare Argo Tunnel Routing${plain}"
+ echo -e "  ${CYAN}[13]${plain} ${WHITE}Change SSH Banner${plain}"
+ echo -e "  ${CYAN}[14]${plain} ${WHITE}Setup Service (ON/OFF)${plain}"
+ echo -e "  ${CYAN}[15]${plain} ${WHITE}Menu API / REST API Support${plain}"
+ echo -e "  ${CYAN}[16]${plain} ${WHITE}Menu Admin VPS${plain}"
+ echo -e "  ${CYAN}[17]${plain} ${WHITE}Back to Main Menu${plain}"
+ cmd; echo -e "  ${CYAN}[ x]${plain} ${WHITE}Exit${plain}"; cmd; echo
+ read -rp " $(echo -e "${WHITE}Please select an option [01-17 or x]:${plain} ")" asu
+ case "$asu" in
+  1|01) menu-domain;; 2|02) bmenu;; 3|03) change_timezone;; 4|04) restart_all; read -rp 'Press Enter to continue...' _;;
+  5|05) adjust-text-brightness; exec menu-system;; 6|06) check-streaming-country;; 7|07) bot-menu;; 8|08) ipv6-control;; 9|09) rebuild_vps;;
+  10) detail; read -rp 'Press Enter to continue...' _;; 11) system_status; read -rp 'Press Enter to continue...' _;; 12) menu-argo;; 13) change_banner; read -rp 'Press Enter to continue...' _;; 14) fn-sc1;; 15) menu-api;; 16) menu-admin;; 17) exec menu;;
+  x|X) clear; exit 0;; *) invalid;;
+ esac
+done
+
+__KAIZEN_MENU_SYSTEM_REINSTALL_PASSWORD__
+
+chmod 0755 "$TARGET"
+bash -n "$TARGET"
+
+echo
+echo "Patch installed successfully."
+echo "Backup: $BACKUP"
+echo "Reinstall / Rebuild VPS will now ask for a new root password after YES confirmation."
