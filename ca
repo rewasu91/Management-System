@@ -2,74 +2,11 @@
 set -euo pipefail
 RERE=/usr/local/rere
 STAMP="$(date +%Y%m%d-%H%M%S)"
-BACKUP="/root/kaizensc-full-notify-gdrive-backup-${STAMP}"
+BACKUP="/root/kaizensc-telegram-xray-backup-style-${STAMP}"
 
 [[ ${EUID:-$(id -u)} -eq 0 ]] || { echo "Please run as root."; exit 1; }
 [[ -d "$RERE" ]] || { echo "KaizenSC not found: $RERE"; exit 1; }
-
 mkdir -p "$BACKUP"
-
-[[ -f "$RERE/account-notify-full" ]] && cp -a "$RERE/account-notify-full" "$BACKUP/account-notify-full" || true
-cat > "$RERE/account-notify-full" <<'__KZN_ACCOUNT_NOTIFY_FULL__'
-#!/usr/bin/env bash
-set -u
-BOT_DIR=/etc/kaizensc/bot/notif
-BOT_KEY="$BOT_DIR/bot.key"
-CHAT_ID="$BOT_DIR/client.id"
-
-title="${1:-KaizenSC Account}"
-protocol="${2:-Unknown}"
-account="${3:-Unknown}"
-
-[[ -s "$BOT_KEY" && -s "$CHAT_ID" ]] || exit 0
-command -v curl >/dev/null 2>&1 || exit 0
-
-token=$(tr -d '\r\n' < "$BOT_KEY" 2>/dev/null)
-chat=$(tr -d '\r\n' < "$CHAT_ID" 2>/dev/null)
-[[ -n "$token" && -n "$chat" ]] || exit 0
-
-body=$(cat)
-[[ -n "$body" ]] || exit 0
-
-domain=$(cat /etc/xray/domain 2>/dev/null || hostname -f 2>/dev/null || hostname)
-server_ip=$(hostname -I 2>/dev/null | awk '{print $1}')
-[[ -n "$server_ip" ]] || server_ip="-"
-
-payload="✅ ${title}
-Protocol : ${protocol}
-Account  : ${account}
-Server   : ${domain}
-IP VPS   : ${server_ip}
-
-${body}"
-
-max=3800
-while [[ -n "$payload" ]]; do
-  if ((${#payload}<=max)); then
-    chunk="$payload"
-    payload=""
-  else
-    chunk="${payload:0:max}"
-    last_nl=$(awk -v s="$chunk" 'BEGIN{p=0;for(i=1;i<=length(s);i++)if(substr(s,i,1)=="\n")p=i;print p}')
-    if ((last_nl>500)); then
-      chunk="${payload:0:last_nl}"
-      payload="${payload:last_nl}"
-    else
-      payload="${payload:max}"
-    fi
-  fi
-
-  curl -fsS --connect-timeout 5 --max-time 15 --retry 1 \
-    -X POST "https://api.telegram.org/bot${token}/sendMessage" \
-    --data-urlencode "chat_id=${chat}" \
-    --data-urlencode "text=${chunk}" \
-    >/dev/null 2>&1 || true
-done
-exit 0
-
-__KZN_ACCOUNT_NOTIFY_FULL__
-chmod 0755 "$RERE/account-notify-full"
-bash -n "$RERE/account-notify-full"
 
 [[ -f "$RERE/xray-account" ]] && cp -a "$RERE/xray-account" "$BACKUP/xray-account" || true
 cat > "$RERE/xray-account" <<'__KZN_XRAY_ACCOUNT__'
@@ -181,6 +118,69 @@ clear_account_login_state(){
 add_json(){ local p=$1 email=$2 cred=$3 key; key=$(credential_key "$p"); jq --arg p "$p" --arg e "$email" --arg c "$cred" --arg k "$key" '(.inbounds[] | select(.protocol==$p) | .settings.clients) += [if $k=="id" then {id:$c,email:$e,level:0} else {password:$c,email:$e,level:0} end]' "$(json "$p")" > "$(json "$p").tmp" && mv "$(json "$p").tmp" "$(json "$p")"; }
 delete_json(){ local p=$1 email=$2; jq --arg p "$p" --arg e "$email" '(.inbounds[] | select(.protocol==$p) | .settings.clients) |= map(select(.email!=$e))' "$(json "$p")" > "$(json "$p").tmp" && mv "$(json "$p").tmp" "$(json "$p")"; }
 update_credential_json(){ local p=$1 email=$2 cred=$3 key; key=$(credential_key "$p"); jq --arg p "$p" --arg e "$email" --arg c "$cred" --arg k "$key" '(.inbounds[] | select(.protocol==$p) | .settings.clients) |= map(if .email==$e then (if $k=="id" then .id=$c else .password=$c end) else . end)' "$(json "$p")" > "$(json "$p").tmp" && mv "$(json "$p").tmp" "$(json "$p")"; }
+
+xray_html_escape(){
+  printf '%s' "${1:-}" | sed 's/&/\&amp;/g; s/</\&lt;/g; s/>/\&gt;/g'
+}
+xray_send_html(){
+  local html="$1" token chat
+  [[ -s /etc/kaizensc/bot/notif/bot.key && -s /etc/kaizensc/bot/notif/client.id ]] || return 0
+  command -v curl >/dev/null 2>&1 || return 0
+  token=$(tr -d '\r\n' < /etc/kaizensc/bot/notif/bot.key 2>/dev/null)
+  chat=$(tr -d '\r\n' < /etc/kaizensc/bot/notif/client.id 2>/dev/null)
+  [[ -n "$token" && -n "$chat" ]] || return 0
+  curl -fsS --connect-timeout 5 --max-time 15 --retry 1 \
+    -X POST "https://api.telegram.org/bot${token}/sendMessage" \
+    --data-urlencode "chat_id=${chat}" \
+    --data-urlencode "parse_mode=HTML" \
+    --data-urlencode "disable_web_page_preview=true" \
+    --data-urlencode "text=${html}" >/dev/null 2>&1 || true
+}
+xray_notify_created_html(){
+  local p="$1" email="$2" cred="$3" d="$4" exp="$5"
+  local raw line info="" links_html="" title section escaped msg part
+  raw=$(links "$p" "$email" "$cred" "$d" "$exp" 2>/dev/null || true)
+  [[ -n "$raw" ]] || return 0
+  title="$(proto_label "$p") ACCOUNT"
+
+  while IFS= read -r line; do
+    [[ -n "$line" ]] || continue
+    case "$line" in
+      ═*) ;;
+      \[*\])
+        section="${line#[}"
+        section="${section%]}"
+        links_html+=$'\n'"<b>$(xray_html_escape "$section") :</b>"$'\n'
+        ;;
+      vless://*|vmess://*|trojan://*)
+        escaped=$(xray_html_escape "$line")
+        links_html+="<pre><code>${escaped}</code></pre>"$'\n'
+        ;;
+      *)
+        escaped=$(xray_html_escape "$line")
+        info+="<code>${escaped}</code>"$'\n'
+        ;;
+    esac
+  done <<< "$raw"
+
+  msg="<b>&lt;${title}&gt;</b>"$'\n\n'"${info}"
+  if ((${#msg}+${#links_html} <= 3900)); then
+    xray_send_html "${msg}"$'\n'"${links_html}"
+    return 0
+  fi
+
+  xray_send_html "$msg"
+  part=""
+  while IFS= read -r line; do
+    [[ -n "$line" ]] || continue
+    if ((${#part}+${#line}+1 > 3800)); then
+      xray_send_html "$part"
+      part=""
+    fi
+    part+="$line"$'\n'
+  done <<< "$links_html"
+  [[ -n "$part" ]] && xray_send_html "$part"
+}
 
 links(){
  local p="${1:-}" email="${2:-}" c="${3:-}" d="${4:-}" exp="${5:-}"
@@ -353,10 +353,8 @@ create(){
  restart_proto "$p"
  local full_config
  full_config=$(links "$p" "$email" "$cred" "$(domain)" "$exp" 2>/dev/null || true)
- printf '%s
-' "$full_config" | /usr/local/rere/account-notify-full "$(proto_label "$p") Account Created" "$(proto_label "$p")" "${email%@*}" >/dev/null 2>&1 || true
- clear; action_header "$(proto_label "$p") Account Information"; printf '%s
-' "$full_config"
+ xray_notify_created_html "$p" "$email" "$cred" "$(domain)" "$exp" >/dev/null 2>&1 || true
+ clear; action_header "$(proto_label "$p") Account Information"; printf '%s\n' "$full_config"
 }
 
 xray_recent_ips(){
@@ -639,286 +637,6 @@ __KZN_XRAY_ACCOUNT__
 chmod 0755 "$RERE/xray-account"
 bash -n "$RERE/xray-account"
 
-[[ -f "$RERE/menu-wgcf" ]] && cp -a "$RERE/menu-wgcf" "$BACKUP/menu-wgcf" || true
-cat > "$RERE/menu-wgcf" <<'__KZN_MENU_WGCF__'
-#!/usr/bin/env bash
-source /usr/local/rere/kaizen-ui 2>/dev/null || true
-RED='\e[0;31m'; GREEN='\e[0;32m'; CYAN='\e[0;36m'; WHITE='\e[0;97m'; plain='\e[0m'
-DB=/etc/kaizensc/database/wireguard/accounts.tsv
-WEB=/var/www/html/fn
-mkdir -p "$(dirname "$DB")" "$WEB"; touch "$DB"
-[[ -x /usr/bin/warp ]] || { wget -qO /usr/bin/warp https://raw.githubusercontent.com/rany2/warp.sh/master/warp.sh && chmod +x /usr/bin/warp; }
-domain=$(cat /etc/xray/domain 2>/dev/null || hostname -f)
-header(){ clear; kaizen_header " • $1 • "; }
-cmd(){ printf '  '; for i in {52..57} {57..52}; do printf "\e[38;5;${i}m────\e[0m"; done; echo; }
-valid_user(){ [[ "$1" =~ ^[A-Za-z0-9_.-]+$ ]]; }
-list_accounts(){
- local title="${1:-List Wireguard Account}" count=0 u type exp file uw=16 ew=11
- header "$title"
- while IFS='|' read -r u type exp file; do [[ -n "$u" ]] || continue; exp="${exp%% *}"; ((${#u}>uw))&&uw=${#u}; ((${#exp}>ew))&&ew=${#exp}; done < "$DB"
- C=$(kaizen_table_colour); W=$(kaizen_text_colour); R=$(kaizen_reset); BG='\e[0;47;30m'
- a=$(kaizen_repeat_line '─' $((uw+2))); b=$(kaizen_repeat_line '─' 8); d=$(kaizen_repeat_line '─' $((ew+2)))
- printf '%b┌%s┬%s┬%s┐%b\n' "$C" "$a" "$b" "$d" "$R"
- printf '%b│%b%b %-*s %b%b│%b%b %-6s %b%b│%b%b %-*s %b%b│%b\n' "$C" "$R" "$BG" "$uw" Username "$R" "$C" "$R" "$BG" Type "$R" "$C" "$R" "$BG" "$ew" "Expire Date" "$R" "$C" "$R"
- printf '%b├%s┼%s┼%s┤%b\n' "$C" "$a" "$b" "$d" "$R"
- while IFS='|' read -r u type exp file; do [[ -n "$u" ]] || continue; exp="${exp%% *}"; count=$((count+1)); printf '%b│%b %-*s %b│%b %-6s %b│%b %-*s %b│%b\n' "$C" "$W" "$uw" "$u" "$C" "$W" "$type" "$C" "$W" "$ew" "$exp" "$C" "$R"; done < "$DB"
- LIST_COUNT=$count
- if [[ "${SHOW_WG_TOTAL:-0}" == 1 ]]; then
-   inner=$((uw + 6 + ew + 8))
-   printf '%b├%s┴%s┴%s┤%b\n' "$C" "$a" "$b" "$d" "$R"
-   printf '%b│%b Total User : %b%-*s%b│%b\n' "$C" "$W" "$(kaizen_yellow)" "$((inner-14))" "$count" "$C" "$R"
-   printf '%b└%s┘%b\n' "$C" "$(kaizen_repeat_line '─' "$inner")" "$R"
- else
-   printf '%b└%s┴%s┴%s┘%b\n' "$C" "$a" "$b" "$d" "$R"
- fi
-}
-create_account(){
- local type="$1" flag username expin exp filename url
- header "CREATE WIREGUARD $type ACCOUNT"
- echo -e "  $(kaizen_text_colour)Information on adding an account$(kaizen_reset)"
- echo
- kaizen_expiry_help
- echo
- kaizen_rainbow_line
- echo
- read -rp "Username: " username; valid_user "$username" || { echo -e "${RED}Invalid username.${plain}"; sleep 1; return; }
- awk -F'|' -v u="$username" '$1==u{found=1} END{exit !found}' "$DB" && { echo -e "${RED}Username already exists.${plain}"; sleep 1; return; }
- while true; do
-   read -rp "Expired: " expin
-   exp=$(kaizen_parse_expiry "$expin" 2>/dev/null) && [[ -n "$exp" ]] && break
-   echo -e "${RED}Invalid expiry. Use 10, YYYY-MM-DD, or YYYY-MM-DD HH:MM:SS.${plain}"
- done
- filename="wg-${username}-${type,,}.conf"; flag=-4; [[ "$type" == IPv6 ]] && flag=-6
- if ! warp "$flag" > "$WEB/$filename"; then echo -e "${RED}Failed to generate Wireguard config.${plain}"; rm -f "$WEB/$filename"; sleep 2; return; fi
- printf '%s|%s|%s|%s\n' "$username" "$type" "$exp" "$filename" >> "$DB"
- url="https://$domain/fn/$filename"
- {
-   echo "Username    : $username"
-   echo "Type        : $type"
-   echo "Expire Date : $exp"
-   echo "Download    : $url"
-   echo
-   echo "WireGuard Config:"
-   cat "$WEB/$filename" 2>/dev/null || true
- } | /usr/local/rere/account-notify-full "WireGuard Account Created" WireGuard "$username" >/dev/null 2>&1 || true
- header "WIREGUARD ACCOUNT CREATED"
- echo "Username    : $username"; echo "Type        : $type"; echo "Expire Date : $exp"; echo "Download    : $url"
- read -rp 'Press Enter to continue...' _
-}
-delete_account(){
- list_accounts "DELETE WIREGUARD ACCOUNT"; ((LIST_COUNT>0)) || { read -rp 'Press Enter...' _; return; }
- read -rp "Username to delete: " user; row=$(awk -F'|' -v u="$user" '$1==u{print;exit}' "$DB"); [[ -n "$row" ]] || { echo "[ERROR] Account not found."; sleep 1; return; }
- read -rp "Delete Wireguard account '$user'? (y/n): " yn; [[ "$yn" =~ ^[Yy]$ ]] || return
- file=$(echo "$row"|cut -d'|' -f4)
- awk -F'|' -v u="$user" '$1!=u' "$DB" > "$DB.tmp"
- mv "$DB.tmp" "$DB"
- rm -f "$WEB/$file"
- /usr/local/rere/account-notify DELETED WireGuard "$user" >/dev/null 2>&1 || true
- header "WIREGUARD ACCOUNT DELETED"; echo "Account : $user"; echo "Status  : DELETED"; read -rp 'Press Enter...' _
-}
-extend_account(){
- list_accounts "EXTEND WIREGUARD ACCOUNT"; ((LIST_COUNT>0)) || { read -rp 'Press Enter...' _; return; }
- echo
- kaizen_expiry_help
- echo
- kaizen_rainbow_line
- echo
- read -rp "Username to extend: " user; row=$(awk -F'|' -v u="$user" '$1==u{print;exit}' "$DB"); [[ -n "$row" ]] || { echo "[ERROR] Account not found."; sleep 1; return; }
- old=$(echo "$row"|cut -d'|' -f3)
- while true; do
-   read -rp "Expired: " expin
-   new=$(kaizen_parse_expiry "$expin" "$old" 2>/dev/null) && [[ -n "$new" ]] && break
-   echo -e "${RED}Invalid expiry. Use 10, YYYY-MM-DD, or YYYY-MM-DD HH:MM:SS.${plain}"
- done
- awk -F'|' -v OFS='|' -v u="$user" -v n="$new" '$1==u{$3=n}1' "$DB" > "$DB.tmp" && mv "$DB.tmp" "$DB"
- /usr/local/rere/account-notify EXTENDED WireGuard "$user" "Expire: $new" >/dev/null 2>&1 || true
- header "WIREGUARD ACCOUNT EXTENDED"
- echo "Account      : $user"
- echo "Previous     : $old"
- echo "New Expiry   : $new"
- echo "Status       : SUCCESS"
- read -rp 'Press Enter...' _
-}
-check_config(){
- list_accounts "CHECK WIREGUARD CONFIG"; ((LIST_COUNT>0)) || { read -rp 'Press Enter...' _; return; }
- read -rp "Username: " user; row=$(awk -F'|' -v u="$user" '$1==u{print;exit}' "$DB"); [[ -n "$row" ]] || { echo "[ERROR] Account not found."; sleep 1; return; }
- IFS='|' read -r u type exp file <<< "$row"; header "WIREGUARD ACCOUNT CONFIG"
- echo "Username    : $u"; echo "Type        : $type"; echo "Expire Date : $exp"; echo "Download    : https://$domain/fn/$file"; echo; cat "$WEB/$file" 2>/dev/null || true
- read -rp 'Press Enter to continue...' _
-}
-while true; do
- header "MENU WIREGUARD"
- echo -e "  ${CYAN}[01]${plain} ${WHITE}Create Account with IPv4${plain}"
- echo -e "  ${CYAN}[02]${plain} ${WHITE}Create Account with IPv6${plain}"
- echo -e "  ${CYAN}[03]${plain} ${WHITE}List Wireguard Account${plain}"
- echo -e "  ${CYAN}[04]${plain} ${WHITE}Delete Wireguard Account${plain}"
- echo -e "  ${CYAN}[05]${plain} ${WHITE}Extend Wireguard Account${plain}"
- echo -e "  ${CYAN}[06]${plain} ${WHITE}Check Wireguard Config${plain}"
- echo -e "  ${CYAN}[07]${plain} ${WHITE}Back to Menu${plain}"
- cmd; echo -e "  ${CYAN}[ x]${plain} ${WHITE}Exit${plain}"; cmd
- read -rp "Please select an option [01-07 or x]: " opt
- case "$opt" in 1|01) create_account IPv4;;2|02) create_account IPv6;;3|03) SHOW_WG_TOTAL=1; list_accounts; SHOW_WG_TOTAL=0; read -rp 'Press Enter...' _;;4|04) delete_account;;5|05) extend_account;;6|06) check_config;;7|07) exec menu;;x|X) exit 0;;*) sleep 1;;esac
-done
-
-__KZN_MENU_WGCF__
-chmod 0755 "$RERE/menu-wgcf"
-bash -n "$RERE/menu-wgcf"
-
-[[ -f "$RERE/menu-udp-zivpn" ]] && cp -a "$RERE/menu-udp-zivpn" "$BACKUP/menu-udp-zivpn" || true
-cat > "$RERE/menu-udp-zivpn" <<'__KZN_MENU_UDP_ZIVPN__'
-#!/usr/bin/env bash
-source /usr/local/rere/kaizen-ui 2>/dev/null || true
-RED='\e[0;31m'; GREEN='\e[0;32m'; CYAN='\e[0;36m'; WHITE='\e[0;97m'; plain='\e[0m'
-CONFIG=/etc/zivpn/config.json; SERVICE=/etc/systemd/system/zivpn.service; BIN=/usr/local/bin/zivpn; DB=/etc/zivpn/password.json
-header(){ clear; kaizen_header " • $1 • "; }
-cmd(){ printf '  '; for i in {52..57} {57..52}; do printf "\e[38;5;${i}m────\e[0m"; done; echo; }
-installed(){ [[ -x "$BIN" && -f "$CONFIG" && -f "$SERVICE" ]]; }
-init_db(){ mkdir -p /etc/zivpn; [[ -f "$DB" ]] || echo '[]' > "$DB"; }
-passwords(){ jq -r '.auth.config[]?' "$CONFIG" 2>/dev/null; }
-get_port(){ jq -r '.listen // ""' "$CONFIG" 2>/dev/null | grep -oE '[0-9]+'|head -1; }
-get_obfs(){ jq -r '.obfs // "-"' "$CONFIG" 2>/dev/null; }
-update_passwords(){
- local json; json=$(printf '%s\n' "$@" | jq -R . | jq -s .)
- jq --argjson a "$json" '.auth.config=$a' "$CONFIG" > "$CONFIG.tmp" && mv "$CONFIG.tmp" "$CONFIG"
- systemctl restart zivpn
-}
-pw_exp(){ init_db; jq -r --arg p "$1" '.[]|select(.password==$p)|.expired' "$DB"|head -1; }
-list_table(){
- local title="$1" show_total="${2:-0}" count=0 p exp pw=16 ew=11
- header "$title"; mapfile -t arr < <(passwords)
- for p in "${arr[@]}"; do exp=$(pw_exp "$p"); [[ -n "$exp" && "$exp" != null ]] || exp="-"; exp="${exp%% *}"; ((${#p}>pw))&&pw=${#p}; ((${#exp}>ew))&&ew=${#exp}; done
- C=$(kaizen_table_colour); W=$(kaizen_text_colour); R=$(kaizen_reset); BG='\e[0;47;30m'; a=$(kaizen_repeat_line '─' $((pw+2))); b=$(kaizen_repeat_line '─' $((ew+2)))
- printf '%b┌%s┬%s┐%b\n' "$C" "$a" "$b" "$R"; printf '%b│%b%b %-*s %b%b│%b%b %-*s %b%b│%b\n' "$C" "$R" "$BG" "$pw" Password "$R" "$C" "$R" "$BG" "$ew" "Expire Date" "$R" "$C" "$R"; printf '%b├%s┼%s┤%b\n' "$C" "$a" "$b" "$R"
- for p in "${arr[@]}"; do exp=$(pw_exp "$p"); [[ -n "$exp" && "$exp" != null ]] || exp="-"; exp="${exp%% *}"; count=$((count+1)); printf '%b│%b %-*s %b│%b %-*s %b│%b\n' "$C" "$W" "$pw" "$p" "$C" "$W" "$ew" "$exp" "$C" "$R"; done
- ZCOUNT=$count
- if [[ "$show_total" == 1 ]]; then
-   inner=$((pw + ew + 5))
-   printf '%b├%s┴%s┤%b\n' "$C" "$a" "$b" "$R"
-   printf '%b│%b Total User : %b%-*s%b│%b\n' "$C" "$W" "$(kaizen_yellow)" "$((inner-14))" "$count" "$C" "$R"
-   printf '%b└%s┘%b\n' "$C" "$(kaizen_repeat_line '─' "$inner")" "$R"
- else
-   printf '%b└%s┴%s┘%b\n' "$C" "$a" "$b" "$R"
- fi
-}
-install_z(){
- header "INSTALL / UPDATE ZIVPN"
- wget -qO "$BIN" https://github.com/zahidbd2/udp-zivpn/releases/download/udp-zivpn_1.4.9/udp-zivpn-linux-amd64 || { echo "Download failed."; read -rp 'Press Enter...' _; return; }
- chmod +x "$BIN"; mkdir -p /etc/zivpn; init_db
- port=$(get_port); [[ "$port" =~ ^[0-9]+$ ]] || port=5667
- [[ -f /etc/zivpn/zivpn.key ]] || openssl req -new -newkey rsa:4096 -days 365 -nodes -x509 -subj "/CN=zivpn" -keyout /etc/zivpn/zivpn.key -out /etc/zivpn/zivpn.crt >/dev/null 2>&1
- [[ -f "$CONFIG" ]] || cat > "$CONFIG" <<EOF
-{"listen":":$port","cert":"/etc/zivpn/zivpn.crt","key":"/etc/zivpn/zivpn.key","obfs":"zivpn","auth":{"mode":"passwords","config":["zi"]}}
-EOF
- cat > "$SERVICE" <<EOF
-[Unit]
-Description=ZiVPN UDP Server
-After=network.target
-[Service]
-Type=simple
-User=root
-WorkingDirectory=/etc/zivpn
-ExecStart=$BIN server -c $CONFIG
-Restart=always
-RestartSec=3
-[Install]
-WantedBy=multi-user.target
-EOF
- systemctl daemon-reload; systemctl enable --now zivpn
- header "ZIVPN INSTALLED"; echo "Status : SUCCESS"; echo "Port   : $(get_port)"; read -rp 'Press Enter...' _
-}
-add_pw(){
- installed || { header "ADD ZIVPN PASSWORD"; echo "ZIVPN is not installed."; read -rp 'Press Enter...' _; return; }
- header "ADD ZIVPN PASSWORD"
- echo -e "  $(kaizen_text_colour)Information on adding an account$(kaizen_reset)"
- echo
- kaizen_expiry_help
- echo
- kaizen_rainbow_line
- echo
- read -rp "Password: " pw; [[ -n "$pw" ]] || return
- passwords | grep -Fxq "$pw" && { echo "Password already exists."; sleep 1; return; }
- while true; do
-   read -rp "Expired: " expin
-   exp=$(kaizen_parse_expiry "$expin" 2>/dev/null) && [[ -n "$exp" ]] && break
-   echo "Invalid expiry. Use 10, YYYY-MM-DD, or YYYY-MM-DD HH:MM:SS."
- done
- mapfile -t arr < <(passwords); arr+=("$pw"); update_passwords "${arr[@]}"; init_db
- jq --arg p "$pw" --arg e "$exp" 'del(.[]|select(.password==$p)) + [{"password":$p,"expired":$e}]' "$DB" > "$DB.tmp" && mv "$DB.tmp" "$DB"
- {
-   echo "Password    : $pw"
-   echo "Expire Date : $exp"
-   echo "Domain      : $(cat /etc/xray/domain 2>/dev/null || hostname -f)"
-   echo "Port        : $(get_port)"
-   echo "Obfs        : $(get_obfs)"
-   echo "Status      : SUCCESS"
- } | /usr/local/rere/account-notify-full "ZiVPN Password Created" ZiVPN "$pw" >/dev/null 2>&1 || true
- header "ZIVPN PASSWORD CREATED"; echo "Password    : $pw"; echo "Expire Date : $exp"; echo "Status      : SUCCESS"; read -rp 'Press Enter...' _
-}
-delete_pw(){
- installed || { header "DELETE ZIVPN PASSWORD"; echo "ZIVPN is not installed."; read -rp 'Press Enter...' _; return; }
- list_table "DELETE ZIVPN PASSWORD"; ((ZCOUNT)) || { read -rp 'Press Enter...' _; return; }; read -rp "Password to delete: " pw
- mapfile -t arr < <(passwords); found=0; new=(); for x in "${arr[@]}"; do [[ "$x" == "$pw" ]] && { found=1; continue; }; new+=("$x"); done; ((found)) || { echo "Password not found."; sleep 1; return; }
- ((${#new[@]})) || { echo "At least one password must remain."; sleep 1; return; }
- read -rp "Delete password '$pw'? (y/n): " yn; [[ "$yn" =~ ^[Yy]$ ]] || return
- update_passwords "${new[@]}"; jq --arg p "$pw" 'del(.[]|select(.password==$p))' "$DB" > "$DB.tmp" && mv "$DB.tmp" "$DB"
- /usr/local/rere/account-notify DELETED ZiVPN "$pw" >/dev/null 2>&1 || true
- header "ZIVPN PASSWORD DELETED"; echo "Password : $pw"; echo "Status   : DELETED"; read -rp 'Press Enter...' _
-}
-extend_pw(){
- installed || { header "EXTEND ZIVPN ACCOUNT"; echo "ZIVPN is not installed."; read -rp 'Press Enter...' _; return; }
- list_table "EXTEND ZIVPN ACCOUNT"
- ((ZCOUNT)) || { read -rp 'Press Enter...' _; return; }
- echo
- kaizen_expiry_help
- echo
- kaizen_rainbow_line
- echo
- read -rp "Password to extend: " pw
- old=$(pw_exp "$pw"); [[ -n "$old" && "$old" != null ]] || { echo "Password not found."; sleep 1; return; }
- while true; do
-   read -rp "Expired: " expin
-   new=$(kaizen_parse_expiry "$expin" "$old" 2>/dev/null) && [[ -n "$new" ]] && break
-   echo "Invalid expiry. Use 10, YYYY-MM-DD, or YYYY-MM-DD HH:MM:SS."
- done
- jq --arg p "$pw" --arg e "$new" 'map(if .password==$p then .expired=$e else . end)' "$DB" > "$DB.tmp" && mv "$DB.tmp" "$DB"
- /usr/local/rere/account-notify EXTENDED ZiVPN "$pw" "Expire: $new" >/dev/null 2>&1 || true
- header "ZIVPN ACCOUNT EXTENDED"
- echo "Password     : $pw"
- echo "Previous     : $old"
- echo "New Expiry   : $new"
- echo "Status       : SUCCESS"
- read -rp 'Press Enter...' _
-}
-status_z(){
- header "ZIVPN STATUS"; if installed; then systemctl is-active --quiet zivpn && st=ONLINE || st=OFFLINE; else st=NOT-INSTALLED; fi
- [[ "$st" == ONLINE ]] && c=$(kaizen_green) || c=$(kaizen_red); W=$(kaizen_text_colour); R=$(kaizen_reset)
- printf '%bStatus : %b%s%b\n' "$W" "$c" "$st" "$R"; echo "Port   : $(get_port 2>/dev/null || echo -)"; echo "Obfs   : $(get_obfs 2>/dev/null || echo -)"; read -rp 'Press Enter...' _
-}
-change_obfs(){ installed || return; header "CHANGE ZIVPN OBFS"; echo "Current : $(get_obfs)"; read -rp "New Obfs: " v; [[ -n "$v" ]] || return; jq --arg v "$v" '.obfs=$v' "$CONFIG" > "$CONFIG.tmp"&&mv "$CONFIG.tmp" "$CONFIG"; systemctl restart zivpn; header "ZIVPN OBFS UPDATED"; echo "Obfs : $v"; echo "Status : SUCCESS"; read -rp 'Press Enter...' _; }
-change_port(){ installed || return; header "CHANGE ZIVPN PORT"; echo "Current : $(get_port)"; read -rp "New Port: " v; [[ "$v" =~ ^[0-9]+$ && $v -ge 1 && $v -le 65535 ]] || return; jq --arg v ":$v" '.listen=$v' "$CONFIG" > "$CONFIG.tmp"&&mv "$CONFIG.tmp" "$CONFIG"; systemctl restart zivpn; header "ZIVPN PORT UPDATED"; echo "Port : $v"; echo "Status : SUCCESS"; read -rp 'Press Enter...' _; }
-list_cfg(){ installed || return; list_table "LIST ZIVPN PASSWORD" 1; read -rp 'Press Enter...' _; }
-uninstall_z(){ header "UNINSTALL ZIVPN"; read -rp "Uninstall ZIVPN? (y/n): " yn; [[ "$yn" =~ ^[Yy]$ ]] || return; systemctl disable --now zivpn >/dev/null 2>&1||true; rm -f "$SERVICE" "$BIN"; systemctl daemon-reload; header "ZIVPN UNINSTALLED"; echo "Status : SUCCESS"; read -rp 'Press Enter...' _; }
-while true; do
- header "MENU UDP ZIVPN"
- echo -e "  ${CYAN}[01]${plain} ${WHITE}Install / Update ZIVPN${plain}"
- echo -e "  ${CYAN}[02]${plain} ${WHITE}Add Password${plain}"
- echo -e "  ${CYAN}[03]${plain} ${WHITE}Delete Password${plain}"
- echo -e "  ${CYAN}[04]${plain} ${WHITE}Extend Account${plain}"
- echo -e "  ${CYAN}[05]${plain} ${WHITE}Uninstall ZIVPN${plain}"
- echo -e "  ${CYAN}[06]${plain} ${WHITE}Check Status${plain}"
- echo -e "  ${CYAN}[07]${plain} ${WHITE}Change Obfs${plain}"
- echo -e "  ${CYAN}[08]${plain} ${WHITE}Change Port${plain}"
- echo -e "  ${CYAN}[09]${plain} ${WHITE}List Config & Password${plain}"
- echo -e "  ${CYAN}[10]${plain} ${WHITE}Back to Menu${plain}"
- cmd; echo -e "  ${CYAN}[ x]${plain} ${WHITE}Exit${plain}"; cmd
- read -rp "Please select an option [01-10 or x]: " opt
- case "$opt" in 1|01) install_z;;2|02) add_pw;;3|03) delete_pw;;4|04) extend_pw;;5|05) uninstall_z;;6|06) status_z;;7|07) change_obfs;;8|08) change_port;;9|09) list_cfg;;10) exec menu;;x|X) exit 0;;*) sleep 1;;esac
-done
-
-__KZN_MENU_UDP_ZIVPN__
-chmod 0755 "$RERE/menu-udp-zivpn"
-bash -n "$RERE/menu-udp-zivpn"
-
 [[ -f "$RERE/backup" ]] && cp -a "$RERE/backup" "$BACKUP/backup" || true
 cat > "$RERE/backup" <<'__KZN_BACKUP__'
 #!/usr/bin/env bash
@@ -926,9 +644,10 @@ set -euo pipefail
 source /usr/local/rere/kaizen-ui 2>/dev/null || true
 
 ZIP_PASSWORD='KznAutoSC'
-STAMP=$(date '+%Y%m%d-%H%M%S')
-RAND=$(openssl rand -hex 3 2>/dev/null || printf '%06d' "$RANDOM")
-ARCHIVE="/root/KaizenSC-Backup-${STAMP}-${RAND}.zip"
+tanggal_file=$(date '+%m-%d-%Y')
+waktu_file=$(date '+%H-%M-%S')
+RAND=$(openssl rand -hex 4 2>/dev/null || printf '%08x' "$RANDOM")
+ARCHIVE="/root/Backup-${RAND}-${tanggal_file}-${waktu_file}.zip"
 WORK=$(mktemp -d /tmp/kaizensc-backup.XXXXXX)
 PAYLOAD="$WORK/backup"
 BOT_DIR=/etc/kaizensc/bot/notif
@@ -1267,7 +986,7 @@ echo "It restores account databases/configuration, not old OS/system files."
 echo
 
 # Pick newest local KaizenSC backup if present.
-backup_file=$(ls -1t /root/KaizenSC-Backup-*.zip 2>/dev/null | head -1 || true)
+backup_file=$(ls -1t /root/Backup-*.zip /root/KaizenSC-Backup-*.zip 2>/dev/null | head -1 || true)
 
 if [[ -n "$backup_file" ]]; then
   echo "Local backup found:"
@@ -1568,27 +1287,8 @@ chmod 0755 "$RERE/restore"
 bash -n "$RERE/restore"
 
 
-# Backup uses the existing KaizenSC rclone remote: rerechan:
-if command -v rclone >/dev/null 2>&1; then
-  if rclone listremotes 2>/dev/null | grep -Fxq 'rerechan:'; then
-    echo "[OK] Google Drive rclone remote rerechan: is available."
-  else
-    echo "[WARN] rclone is installed but rerechan: remote is not configured."
-    echo "[WARN] Backup will still create a local ZIP and report the Drive upload failure safely."
-  fi
-else
-  echo "[WARN] rclone is not installed."
-  echo "[WARN] Backup will still create a local ZIP; install/configure rclone for Google Drive upload."
-fi
-
 echo
 echo "Patch installed successfully."
-echo "Backup of previous scripts: $BACKUP"
-echo
-echo "Included:"
-echo "- Full Xray create config notification"
-echo "- Full WireGuard create config notification"
-echo "- Full ZiVPN create information notification"
-echo "- Google Drive backup upload restored"
-echo "- Previous Backup ID/server info Telegram caption restored"
-echo "- Safe cross-VPS backup validation/restore retained"
+echo "Previous scripts backup: $BACKUP"
+echo "Xray Create notifications now use Telegram monospace/copy blocks."
+echo "Backup filename/caption follows the old Google Drive + Backup ID style."
