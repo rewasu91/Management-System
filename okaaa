@@ -7,22 +7,39 @@ STAMP="$(date +%Y%m%d-%H%M%S)"
 SAVE="/root/kaisc-command-rescue-${STAMP}"
 
 [[ ${EUID:-$(id -u)} -eq 0 ]] || { echo "Run this repair as root."; exit 1; }
+
 mkdir -p "$SAVE"
+
+if ! command -v file >/dev/null 2>&1; then
+    apt-get update -qq
+    DEBIAN_FRONTEND=noninteractive apt-get install -y file >/dev/null
+fi
 
 if [[ ! -d "$NEW" && -d "$OLD" ]]; then
     mv "$OLD" "$NEW"
 fi
-[[ -d "$NEW" ]] || { echo "[ERROR] /usr/local/kaisc not found."; exit 1; }
+
+[[ -d "$NEW" ]] || {
+    echo "[ERROR] /usr/local/kaisc not found."
+    exit 1
+}
 
 mkdir -p /usr/local/bin /etc/profile.d "$SAVE/usr-local-bin"
 
-# Fix permissions and create command shims in /usr/local/bin.
+# Create command shims only for text/script files.
+# Binary files are detected with file(1) and are never read into Bash variables.
 linked=0
 skipped=0
+
 while IFS= read -r -d '' f; do
-    first=$(sed -n '1p' "$f" 2>/dev/null || true)
-    case "$first" in
-        '#!'*)
+    mime=$(file -b --mime-type "$f" 2>/dev/null || true)
+
+    case "$mime" in
+        text/*|application/x-shellscript|application/json|application/x-python|application/xml)
+            if ! head -n 1 "$f" 2>/dev/null | grep -q '^#!'; then
+                continue
+            fi
+
             chmod 0755 "$f" 2>/dev/null || true
             name=$(basename "$f")
             dst="/usr/local/bin/$name"
@@ -35,7 +52,7 @@ while IFS= read -r -d '' f; do
                 ln -s "$f" "$dst"
                 linked=$((linked+1))
             else
-                # Preserve unrelated real binaries, e.g. /usr/local/bin/xray.
+                # Preserve real binaries such as /usr/local/bin/xray.
                 skipped=$((skipped+1))
             fi
             ;;
@@ -54,50 +71,76 @@ chmod 0644 /etc/profile.d/kaisc.sh
 touch /root/.bashrc
 sed -i '\#PATH=/usr/local/rere:#d' /root/.bashrc
 grep -Fq 'PATH=/usr/local/kaisc:$PATH' /root/.bashrc ||
-  printf '%s\n' 'export PATH="/usr/local/kaisc:$PATH"' >> /root/.bashrc
+    printf '%s\n' 'export PATH="/usr/local/kaisc:$PATH"' >> /root/.bashrc
 
-# Update current shell immediately.
 export PATH="/usr/local/kaisc:/usr/local/bin:$PATH"
 hash -r 2>/dev/null || true
 
-# Repair exact old runtime references that may remain after the previous migration.
+# Repair any exact old runtime references left from a partial migration.
 replace_old_path() {
     local target="$1"
     [[ -e "$target" ]] || return 0
+
     if [[ -f "$target" ]]; then
-        grep -Iq '/usr/local/rere' "$target" 2>/dev/null &&
-          sed -i 's#/usr/local/rere#/usr/local/kaisc#g' "$target" || true
-    else
-        while IFS= read -r -d '' f; do
-            sed -i 's#/usr/local/rere#/usr/local/kaisc#g' "$f"
-        done < <(grep -RIlZ '/usr/local/rere' "$target" 2>/dev/null || true)
+        if grep -Iq '/usr/local/rere' "$target" 2>/dev/null; then
+            sed -i 's#/usr/local/rere#/usr/local/kaisc#g' "$target"
+        fi
+        return 0
     fi
+
+    while IFS= read -r -d '' f; do
+        sed -i 's#/usr/local/rere#/usr/local/kaisc#g' "$f"
+    done < <(grep -RIlZ '/usr/local/rere' "$target" 2>/dev/null || true)
 }
 
-for target in "$NEW" /usr/local/bin /usr/local/sbin /etc/systemd/system /etc/cron.d /etc/crontab /root/.bashrc /etc/profile /etc/profile.d; do
+for target in \
+    "$NEW" \
+    /usr/local/bin \
+    /usr/local/sbin \
+    /etc/systemd/system \
+    /etc/cron.d \
+    /etc/crontab \
+    /root/.bashrc \
+    /etc/profile \
+    /etc/profile.d
+do
     replace_old_path "$target"
 done
 
-# Validate shell scripts.
+# Validate only shell-script MIME/text files.
+# This avoids the previous NULL-byte warning completely.
 fail=0
+
 while IFS= read -r -d '' f; do
-    first=$(sed -n '1p' "$f" 2>/dev/null || true)
-    case "$first" in
-        *bash*|*'/sh')
-            if ! bash -n "$f"; then
-                echo "[ERROR] Syntax failed: $f"
-                fail=1
+    mime=$(file -b --mime-type "$f" 2>/dev/null || true)
+
+    case "$mime" in
+        text/*|application/x-shellscript)
+            if head -n 1 "$f" 2>/dev/null | grep -Eq '^#!.*(bash|/sh)'; then
+                if ! bash -n "$f"; then
+                    echo "[ERROR] Syntax failed: $f"
+                    fail=1
+                fi
             fi
             ;;
     esac
 done < <(find "$NEW" -type f -print0)
+
 (( fail == 0 )) || exit 1
 
-# Verify critical commands resolve.
+# Critical commands must resolve after the repair.
 critical=(
-  menu menu-ssh menu-vless menu-vmess menu-trojan menu-system
-  add-vless add-vmess add-trojan
+    menu
+    menu-ssh
+    menu-vless
+    menu-vmess
+    menu-trojan
+    menu-system
+    add-vless
+    add-vmess
+    add-trojan
 )
+
 missing=0
 for cmd in "${critical[@]}"; do
     if ! command -v "$cmd" >/dev/null 2>&1; then
@@ -105,6 +148,7 @@ for cmd in "${critical[@]}"; do
         missing=1
     fi
 done
+
 (( missing == 0 )) || exit 1
 
 systemctl daemon-reload >/dev/null 2>&1 || true
@@ -118,6 +162,7 @@ echo "Command shims    : /usr/local/bin"
 echo "Links created    : $linked"
 echo "Real binaries preserved: $skipped"
 echo
+echo "Critical commands verified:"
 for cmd in "${critical[@]}"; do
     printf '  %-16s -> %s\n' "$cmd" "$(command -v "$cmd")"
 done
