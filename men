@@ -1,0 +1,1406 @@
+#!/usr/bin/env bash
+set -euo pipefail
+TMPDIR_PATCH="$(mktemp -d /tmp/kaizensc-noobz-remove.XXXXXX)"
+trap 'rm -rf "$TMPDIR_PATCH"' EXIT
+
+cat > "$TMPDIR_PATCH/menu" <<'__KAIZEN_MENU__'
+#!/usr/bin/env bash
+
+clear
+
+# === COLOUR ===
+export red='\033[0;31m'
+export NC='\033[0m'
+export cyan='\e[0;36m'
+export green='\e[0;32m'
+RED='\e[0;31m'
+GREEN='\e[0;32m'
+YELLOW='\e[0;33m'
+CYAN="\e[0;36m"
+WHITE='\e[0;97m'
+red='\e[0;31m'
+green='\e[0;32m'
+yellow='\e[0;33m'
+cyan="\e[0;36m"
+white='\e[0;97m'
+plain='\e[0m'
+bgPutih="\e[0;47;30m"
+keatas="${CYAN}│${plain}"
+keatas2="${CYAN}║${plain}"
+
+# === RAINBOW LINE ===
+function cmd()
+{
+  printf "  "
+  for i in {52..57} {57..52}
+  do
+  printf "\e[38;5;${i}m────\e[0m"
+  done
+  echo
+}
+
+# main data
+domain=$(cat /etc/xray/domain)
+
+# system data
+ml=$(echo "$(lsb_release -ds)")
+tram=$(free -m | awk 'NR==2 {print $2}')
+
+# server ping
+url=$(cat /etc/kaizensc/url/ping.url)
+
+ping=$(ping_result=$(ping -c 1 $url | grep -oP 'time=\K\d+\.\d+')
+if (( $(echo "$ping_result < 100" | bc -l) )); then
+    echo -e "\e[0;32m$ping_result ms\e[0m"
+elif (( $(echo "$ping_result < 200" | bc -l) )); then
+    echo -e "\e[0;33m$ping_result ms\e[0m"
+else
+    echo -e "\e[0;31m$ping_result ms\e[0m"
+fi)
+
+    # URL permission configuration
+    PERMISSION_URL="https://kznsc.kznvpn.com/izin.txt"
+    LOCAL_IP=$(cat /root/.ip) # Getting the local IP address
+
+    # Function to calculate remaining time
+    calculate_remaining_days() {
+        local today=$(date +%s)
+        local expired_date=$(date -d "$1" +%s 2>/dev/null)
+        if [ $? -ne 0 ]; then
+            echo "Invalid expiration date."
+            exit 1
+        fi
+        echo $(( (expired_date - today) / 86400 ))
+    }
+
+    # Getting permission and validation
+    clear
+    PERMISSION_DATA=$(curl -s "$PERMISSION_URL" || { echo "Failed to obtain permission."; exit 1; })
+
+    # Match data based on the local IP address.
+    MATCH=$(echo "$PERMISSION_DATA" | grep "###" | grep "$LOCAL_IP")
+    if [ -z "$MATCH" ]; then
+        echo "Your IP doesn’t have on database"
+        exit 1
+    fi
+
+    # Extract data from the matching row.
+    CLIENT_NAME=$(echo "$MATCH" | awk '{print $2}')
+    CLIENT_IP=$(echo "$MATCH" | awk '{print $3}')
+    EXP_DATE=$(echo "$MATCH" | awk '{print $5}')
+
+    # Validate active period
+    DAYS_LEFT=$(calculate_remaining_days "$EXP_DATE")
+    if [ "$DAYS_LEFT" -lt 0 ]; then
+        echo "The permission has expired."
+        exit 1
+    fi
+
+# data isp
+isp=$(cat /root/.isp)
+
+# Detail Badwidth
+clear
+
+# Function to read vnstat data
+read_vnstat_usage() {
+  local interface=$1
+  local today=$(vnstat -i "$interface" | grep "today" | awk '{print $8" "$9}')
+  local yesterday=$(vnstat -i "$interface" | grep "yesterday" | awk '{print $8" "$9}')
+  local this_month=$(vnstat -i "$interface" -m | grep "$(date +"%b '%y")" | awk '{print $9" "$10}')
+  
+  echo "$today;$yesterday;$this_month"
+}
+
+# Function to convert to MB unit
+convert_to_mb() {
+  local value=$1
+  local unit=$2
+  
+  case $unit in
+    B) echo "scale=6; $value / 1048576" | bc ;;
+    KiB) echo "scale=6; $value / 1024" | bc ;;
+    MiB) echo "$value" ;;
+    GiB) echo "scale=6; $value * 1024" | bc ;;
+    TiB) echo "scale=6; $value * 1048576" | bc ;;
+    *) echo "0" ;;
+  esac
+}
+
+# Get all interfaces
+all_interfaces=$(vnstat --iflist | sed 's/Available interfaces: //')
+if [ -z "$all_interfaces" ]; then
+  echo "There are no interfaces available in vnstat."
+  exit 1
+fi
+
+total_today=0
+total_yesterday=0
+total_month=0
+
+for iface in $all_interfaces; do
+  echo "“Processing interface: $iface"
+  result=$(read_vnstat_usage "$iface")
+  echo "Result for $iface: $result"
+  
+  today=$(echo "$result" | awk -F';' '{print $1}')
+  yesterday=$(echo "$result" | awk -F';' '{print $2}')
+  month=$(echo "$result" | awk -F';' '{print $3}')
+  
+  today_value=$(echo "$today" | awk '{print $1}')
+  today_unit=$(echo "$today" | awk '{print $2}')
+  
+  yesterday_value=$(echo "$yesterday" | awk '{print $1}')
+  yesterday_unit=$(echo "$yesterday" | awk '{print $2}')
+  
+  month_value=$(echo "$month" | awk '{print $1}')
+  month_unit=$(echo "$month" | awk '{print $2}')
+  
+  total_today=$(echo "$total_today + $(convert_to_mb $today_value $today_unit)" | bc)
+  total_yesterday=$(echo "$total_yesterday + $(convert_to_mb $yesterday_value $yesterday_unit)" | bc)
+  total_month=$(echo "$total_month + $(convert_to_mb $month_value $month_unit)" | bc)
+done
+
+# Format result
+format_usage() {
+  local value=$1
+  if (( $(echo "$value >= 1024" | bc -l) )); then
+    echo "$(printf "%.2f" $(echo "$value / 1024" | bc)) GB"
+  else
+    echo "$(printf "%.2f" $value) MB"
+  fi
+}
+
+ttoday=$(format_usage "$total_today")
+tyest=$(format_usage "$total_yesterday")
+tmon=$(format_usage "$total_month")
+
+# Total account
+xrayvless=$(xray-account count vless 2>/dev/null || echo 0)
+xrayvmess=$(xray-account count vmess 2>/dev/null || echo 0)
+xraytrojan=$(xray-account count trojan 2>/dev/null || echo 0)
+ssc=$(grep -c "###" /etc/shadowsocks-libev/akun.conf 2>/dev/null || true)
+sshd=$(awk -F: '$3 >= 1000 && $1 != "nobody" {print $1}' /etc/passwd | wc -l)
+
+clear
+echo -e ""
+echo -e "${CYAN}┌─────────────────────────────────────────────────┐${plain}"
+echo -e "${keatas} ${bgPutih}               • VPN PANEL MENU •              ${plain} ${keatas}"
+echo -e "${CYAN}└─────────────────────────────────────────────────┘${plain}"
+echo -e "${white}  OS               : $ml"
+echo -e "${white}  RAM              : $tram MB"
+echo -e "${white}  ISP              : $isp"
+echo -e "${white}  Domain           : $domain"
+echo -e "${white}  Usage Today      : ${GREEN}$ttoday${white}"
+echo -e "${white}  Usage Yesterday  : ${GREEN}$tyest${white}"
+echo -e "${white}  Usage Monthly    : ${GREEN}$tmon${NC}"
+echo -e "${CYAN}┌─────────────────────────────────────────────────┐${plain}"
+echo -e "${keatas} ${bgPutih}                • TOTAL ACCOUNT •              ${plain} ${keatas}"
+echo -e "${CYAN}└─────────────────────────────────────────────────┘${plain}"
+printf "${white}     %-12s : %s   %-12s : %s\n" "SSH/Dropbear" "$sshd" "VLESS" "$xrayvless"
+printf "${white}     %-12s : %s   %-12s : %s\n" "VMESS" "$xrayvmess" "TROJAN" "$xraytrojan"
+printf "${white}     %-12s : %s\n" "Shadowsocks" "$ssc"
+echo -e "${CYAN}┌─────────────────────────────────────────────────┐${plain}"
+echo -e "${keatas} ${bgPutih}                  • MENU LIST •                ${plain} ${keatas}"
+echo -e "${CYAN}└─────────────────────────────────────────────────┘${plain}"
+echo -e "  ${CYAN}[ 1 ]${plain} ${white}Menu SSH${plain}          ${CYAN}[ 6 ]${plain} ${white}Menu Wireguard${plain}"
+echo -e "  ${CYAN}[ 2 ]${plain} ${white}Menu Vless${plain}        ${CYAN}[ 7 ]${plain} ${white}Menu ZiVPN${plain}"
+echo -e "  ${CYAN}[ 3 ]${plain} ${white}Menu Vmess${plain}        ${CYAN}[ 8 ]${plain} ${white}Menu SlowDNS/UDP${plain}"
+echo -e "  ${CYAN}[ 4 ]${plain} ${white}Menu Trojan${plain}       ${CYAN}[ 9 ]${plain} ${white}Menu System VPS${plain}"
+echo -e "  ${CYAN}[ 5 ]${plain} ${white}Menu Shadowsocks${plain}  ${CYAN}[ x ]${plain} ${white}Exit${plain}"
+cmd
+echo -e "${white}  Username   : ${GREEN}$CLIENT_NAME${white}"
+echo -e "${white}  IP Address : ${GREEN}$CLIENT_IP"
+echo -e "${white}  Expire     : ${GREEN}$EXP_DATE${white} (${YELLOW}${DAYS_LEFT} ${white}days left)${NC}"
+cmd
+read -p "  Input Option [1-9 or x]: " lahiya
+case $lahiya in
+1|01) clear ; menu-ssh ;;
+2|02) clear ; menu-vless ;;
+3|03) clear ; menu-vmess ;;
+4|04) clear ; menu-trojan ;;
+5|05) clear ; menu-ss ;;
+6|06) clear ; menu-wgcf ;;
+7|07) clear ; menu-udp-zivpn ;;
+8|08) clear ; menu-udp ;;
+9|09) clear ; menu-system ;;
+x|X) exit ;;
+*) clear ; menu ;;
+esac
+
+__KAIZEN_MENU__
+chmod 0755 "$TMPDIR_PATCH/menu"
+
+cat > "$TMPDIR_PATCH/menu-vless" <<'__KAIZEN_MENU_VLESS__'
+#!/usr/bin/env bash
+RED='\e[0;31m'
+GREEN='\e[0;32m'
+YELLOW='\e[0;33m'
+CYAN='\e[0;36m'
+WHITE='\e[0;97m'
+plain='\e[0m'
+bgPutih='\e[0;47;30m'
+keatas="${CYAN}│${plain}"
+cmd(){
+  printf '  '
+  local i
+  for i in {52..57} {57..52}; do printf "\e[38;5;${i}m────\e[0m"; done
+  echo
+}
+invalid(){
+  echo
+  echo -e "${RED}Invalid option, please try again!${plain}"
+  sleep 1
+}
+center_title(){
+  local title="$1" width=49 len left right
+  len=${#title}; left=$(( (width-len)/2 )); right=$(( width-len-left ))
+  printf "${CYAN}│${plain}${bgPutih}%*s%s%*s${plain}${CYAN}│${plain}\n" "$left" '' "$title" "$right" ''
+}
+
+while true; do
+  clear
+  echo
+  echo -e "${CYAN}┌─────────────────────────────────────────────────┐${plain}"
+  echo -e "${keatas}${bgPutih}           • XRAY VLESS ACCOUNT MENU •           ${plain}${keatas}"
+  echo -e "${CYAN}└─────────────────────────────────────────────────┘${plain}"
+  echo -e "  ${CYAN}[01]${plain} ${WHITE}Create Account [Random UUID]${plain}"
+  echo -e "  ${CYAN}[02]${plain} ${WHITE}Create Account [Custom UUID, IP, Quota]${plain}"
+  echo -e "  ${CYAN}[03]${plain} ${WHITE}Create Vless Trial Account${plain}"
+  echo -e "  ${CYAN}[04]${plain} ${WHITE}Extend Vless Account${plain}"
+  echo -e "  ${CYAN}[05]${plain} ${WHITE}Check Vless Login${plain}"
+  echo -e "  ${CYAN}[06]${plain} ${WHITE}List Vless Account${plain}"
+  echo -e "  ${CYAN}[07]${plain} ${WHITE}Delete Vless Account${plain}"
+  echo -e "  ${CYAN}[08]${plain} ${WHITE}Lock Vless Account${plain}"
+  echo -e "  ${CYAN}[09]${plain} ${WHITE}Unlock Vless Account${plain}"
+  echo -e "  ${CYAN}[10]${plain} ${WHITE}Check Vless Config${plain}"
+  echo -e "  ${CYAN}[11]${plain} ${WHITE}Edit UUID Vless Account${plain}"
+  echo -e "  ${CYAN}[12]${plain} ${WHITE}Edit Limit IP${plain}"
+  echo -e "  ${CYAN}[13]${plain} ${WHITE}Edit Limit IP All${plain}"
+  echo -e "  ${CYAN}[14]${plain} ${WHITE}Edit Limit Quota${plain}"
+  echo -e "  ${CYAN}[15]${plain} ${WHITE}Edit Limit Quota All${plain}"
+  echo -e "  ${CYAN}[16]${plain} ${WHITE}Back to Menu${plain}"
+  cmd
+  echo -e "  ${CYAN}[ x]${plain} ${WHITE}Exit${plain}"
+  cmd
+  echo
+  read -rp " $(echo -e "${WHITE}Please select an option [01-16 or x]:${plain} ")" opt
+  case "$opt" in
+    1|01) xray-account create vless ;;
+    2|02) xray-account custom-create vless ;;
+    3|03) xray-account trial vless ;;
+    4|04) xray-account extend vless ;;
+    5|05) xray-account check vless ;;
+    6|06) xray-account list vless ;;
+    7|07) xray-account delete vless ;;
+    8|08) xray-account lock vless ;;
+    9|09) xray-account unlock vless ;;
+    10) xray-account show vless ;;
+    11) xray-account modify vless ;;
+    12) xray-account change-ip vless ;;
+    13) xray-account change-ip-all vless ;;
+    14) xray-account change-quota vless ;;
+    15) xray-account change-quota-all vless ;;
+    16) exec menu ;;
+    x|X) clear; exit 0 ;;
+    *) invalid; continue ;;
+  esac
+  echo
+  read -rp 'Press Enter to continue...' _
+done
+
+__KAIZEN_MENU_VLESS__
+chmod 0755 "$TMPDIR_PATCH/menu-vless"
+
+cat > "$TMPDIR_PATCH/menu-vmess" <<'__KAIZEN_MENU_VMESS__'
+#!/usr/bin/env bash
+RED='\e[0;31m'
+GREEN='\e[0;32m'
+YELLOW='\e[0;33m'
+CYAN='\e[0;36m'
+WHITE='\e[0;97m'
+plain='\e[0m'
+bgPutih='\e[0;47;30m'
+keatas="${CYAN}│${plain}"
+cmd(){
+  printf '  '
+  local i
+  for i in {52..57} {57..52}; do printf "\e[38;5;${i}m────\e[0m"; done
+  echo
+}
+invalid(){
+  echo
+  echo -e "${RED}Invalid option, please try again!${plain}"
+  sleep 1
+}
+center_title(){
+  local title="$1" width=49 len left right
+  len=${#title}; left=$(( (width-len)/2 )); right=$(( width-len-left ))
+  printf "${CYAN}│${plain}${bgPutih}%*s%s%*s${plain}${CYAN}│${plain}\n" "$left" '' "$title" "$right" ''
+}
+
+while true; do
+  clear
+  echo
+  echo -e "${CYAN}┌─────────────────────────────────────────────────┐${plain}"
+  echo -e "${keatas}${bgPutih}           • XRAY VMESS ACCOUNT MENU •           ${plain}${keatas}"
+  echo -e "${CYAN}└─────────────────────────────────────────────────┘${plain}"
+  echo -e "  ${CYAN}[01]${plain} ${WHITE}Create Account [Random UUID]${plain}"
+  echo -e "  ${CYAN}[02]${plain} ${WHITE}Create Account [Custom UUID, IP, Quota]${plain}"
+  echo -e "  ${CYAN}[03]${plain} ${WHITE}Create Vmess Trial Account${plain}"
+  echo -e "  ${CYAN}[04]${plain} ${WHITE}Extend Vmess Account${plain}"
+  echo -e "  ${CYAN}[05]${plain} ${WHITE}Check Vmess Login${plain}"
+  echo -e "  ${CYAN}[06]${plain} ${WHITE}List Vmess Account${plain}"
+  echo -e "  ${CYAN}[07]${plain} ${WHITE}Delete Vmess Account${plain}"
+  echo -e "  ${CYAN}[08]${plain} ${WHITE}Lock Vmess Account${plain}"
+  echo -e "  ${CYAN}[09]${plain} ${WHITE}Unlock Vmess Account${plain}"
+  echo -e "  ${CYAN}[10]${plain} ${WHITE}Check Vmess Config${plain}"
+  echo -e "  ${CYAN}[11]${plain} ${WHITE}Edit UUID Vmess Account${plain}"
+  echo -e "  ${CYAN}[12]${plain} ${WHITE}Edit Limit IP${plain}"
+  echo -e "  ${CYAN}[13]${plain} ${WHITE}Edit Limit IP All${plain}"
+  echo -e "  ${CYAN}[14]${plain} ${WHITE}Edit Limit Quota${plain}"
+  echo -e "  ${CYAN}[15]${plain} ${WHITE}Edit Limit Quota All${plain}"
+  echo -e "  ${CYAN}[16]${plain} ${WHITE}Back to Menu${plain}"
+  cmd
+  echo -e "  ${CYAN}[ x]${plain} ${WHITE}Exit${plain}"
+  cmd
+  echo
+  read -rp " $(echo -e "${WHITE}Please select an option [01-16 or x]:${plain} ")" opt
+  case "$opt" in
+    1|01) xray-account create vmess ;;
+    2|02) xray-account custom-create vmess ;;
+    3|03) xray-account trial vmess ;;
+    4|04) xray-account extend vmess ;;
+    5|05) xray-account check vmess ;;
+    6|06) xray-account list vmess ;;
+    7|07) xray-account delete vmess ;;
+    8|08) xray-account lock vmess ;;
+    9|09) xray-account unlock vmess ;;
+    10) xray-account show vmess ;;
+    11) xray-account modify vmess ;;
+    12) xray-account change-ip vmess ;;
+    13) xray-account change-ip-all vmess ;;
+    14) xray-account change-quota vmess ;;
+    15) xray-account change-quota-all vmess ;;
+    16) exec menu ;;
+    x|X) clear; exit 0 ;;
+    *) invalid; continue ;;
+  esac
+  echo
+  read -rp 'Press Enter to continue...' _
+done
+
+__KAIZEN_MENU_VMESS__
+chmod 0755 "$TMPDIR_PATCH/menu-vmess"
+
+cat > "$TMPDIR_PATCH/menu-trojan" <<'__KAIZEN_MENU_TROJAN__'
+#!/usr/bin/env bash
+RED='\e[0;31m'
+GREEN='\e[0;32m'
+YELLOW='\e[0;33m'
+CYAN='\e[0;36m'
+WHITE='\e[0;97m'
+plain='\e[0m'
+bgPutih='\e[0;47;30m'
+keatas="${CYAN}│${plain}"
+cmd(){
+  printf '  '
+  local i
+  for i in {52..57} {57..52}; do printf "\e[38;5;${i}m────\e[0m"; done
+  echo
+}
+invalid(){
+  echo
+  echo -e "${RED}Invalid option, please try again!${plain}"
+  sleep 1
+}
+center_title(){
+  local title="$1" width=49 len left right
+  len=${#title}; left=$(( (width-len)/2 )); right=$(( width-len-left ))
+  printf "${CYAN}│${plain}${bgPutih}%*s%s%*s${plain}${CYAN}│${plain}\n" "$left" '' "$title" "$right" ''
+}
+
+while true; do
+  clear
+  echo
+  echo -e "${CYAN}┌─────────────────────────────────────────────────┐${plain}"
+  echo -e "${keatas}${bgPutih}           • XRAY TROJAN ACCOUNT MENU •          ${plain}${keatas}"
+  echo -e "${CYAN}└─────────────────────────────────────────────────┘${plain}"
+  echo -e "  ${CYAN}[01]${plain} ${WHITE}Create Account [Random UUID]${plain}"
+  echo -e "  ${CYAN}[02]${plain} ${WHITE}Create Account [Custom UUID, IP, Quota]${plain}"
+  echo -e "  ${CYAN}[03]${plain} ${WHITE}Create Trojan Trial Account${plain}"
+  echo -e "  ${CYAN}[04]${plain} ${WHITE}Extend Trojan Account${plain}"
+  echo -e "  ${CYAN}[05]${plain} ${WHITE}Check Trojan Login${plain}"
+  echo -e "  ${CYAN}[06]${plain} ${WHITE}List Trojan Account${plain}"
+  echo -e "  ${CYAN}[07]${plain} ${WHITE}Delete Trojan Account${plain}"
+  echo -e "  ${CYAN}[08]${plain} ${WHITE}Lock Trojan Account${plain}"
+  echo -e "  ${CYAN}[09]${plain} ${WHITE}Unlock Trojan Account${plain}"
+  echo -e "  ${CYAN}[10]${plain} ${WHITE}Check Trojan Config${plain}"
+  echo -e "  ${CYAN}[11]${plain} ${WHITE}Edit UUID Trojan Account${plain}"
+  echo -e "  ${CYAN}[12]${plain} ${WHITE}Edit Limit IP${plain}"
+  echo -e "  ${CYAN}[13]${plain} ${WHITE}Edit Limit IP All${plain}"
+  echo -e "  ${CYAN}[14]${plain} ${WHITE}Edit Limit Quota${plain}"
+  echo -e "  ${CYAN}[15]${plain} ${WHITE}Edit Limit Quota All${plain}"
+  echo -e "  ${CYAN}[16]${plain} ${WHITE}Back to Menu${plain}"
+  cmd
+  echo -e "  ${CYAN}[ x]${plain} ${WHITE}Exit${plain}"
+  cmd
+  echo
+  read -rp " $(echo -e "${WHITE}Please select an option [01-16 or x]:${plain} ")" opt
+  case "$opt" in
+    1|01) xray-account create trojan ;;
+    2|02) xray-account custom-create trojan ;;
+    3|03) xray-account trial trojan ;;
+    4|04) xray-account extend trojan ;;
+    5|05) xray-account check trojan ;;
+    6|06) xray-account list trojan ;;
+    7|07) xray-account delete trojan ;;
+    8|08) xray-account lock trojan ;;
+    9|09) xray-account unlock trojan ;;
+    10) xray-account show trojan ;;
+    11) xray-account modify trojan ;;
+    12) xray-account change-ip trojan ;;
+    13) xray-account change-ip-all trojan ;;
+    14) xray-account change-quota trojan ;;
+    15) xray-account change-quota-all trojan ;;
+    16) exec menu ;;
+    x|X) clear; exit 0 ;;
+    *) invalid; continue ;;
+  esac
+  echo
+  read -rp 'Press Enter to continue...' _
+done
+
+__KAIZEN_MENU_TROJAN__
+chmod 0755 "$TMPDIR_PATCH/menu-trojan"
+
+cat > "$TMPDIR_PATCH/fn-sc1" <<'__KAIZEN_FN_SC1__'
+#!/usr/bin/env bash
+source /usr/local/rere/kaizen-ui 2>/dev/null || true
+RED='\e[0;31m'; GREEN='\e[0;32m'; YELLOW='\e[0;33m'; CYAN='\e[0;36m'; WHITE='\e[0;97m'; NC='\e[0m'
+cmd(){ printf '  '; local i; for i in {52..57} {57..52}; do printf "\e[38;5;${i}m────\e[0m"; done; echo; }
+
+unit_exists(){ systemctl cat "$1" >/dev/null 2>&1; }
+get_status(){ systemctl is-active --quiet "$1" && echo -e "${GREEN}[ ON ]${NC}" || echo -e "${RED}[ OFF ]${NC}"; }
+toggle_service(){
+  local svc=$1
+  if ! unit_exists "$svc"; then echo -e "${RED}[ERROR] Service not installed: $svc${NC}"; return 1; fi
+  if systemctl is-active --quiet "$svc"; then
+    systemctl disable --now "$svc" >/dev/null 2>&1 || systemctl stop "$svc"
+    echo -e "${YELLOW}$svc is now OFF.${NC}"
+  else
+    systemctl daemon-reload
+    if systemctl enable --now "$svc"; then echo -e "${GREEN}$svc is now ON.${NC}"; else echo -e "${RED}[ERROR] Failed to start $svc.${NC}"; systemctl --no-pager -l status "$svc" | tail -20; fi
+  fi
+}
+
+# Login notification only uses scripts that actually exist.
+get_status_login_notif(){ [[ -f /etc/kaizensc/bot/ssh-login-bot.flag ]] && echo -e "${GREEN}[ ON ]${NC}" || echo -e "${RED}[ OFF ]${NC}"; }
+toggle_login_notif(){
+  mkdir -p /etc/kaizensc/bot
+  local enabled=0; [[ -f /etc/kaizensc/bot/ssh-login-bot.flag ]] && enabled=1
+  if (( enabled )); then
+    rm -f /etc/kaizensc/bot/ssh-login-bot.flag
+    crontab -l 2>/dev/null | grep -v -E 'cek-login-ssh' | crontab - 2>/dev/null || true
+    echo -e "${YELLOW}Login notification is now OFF.${NC}"
+  else
+    local lines=()
+    if [[ -x /usr/local/rere/cek-login-ssh ]]; then touch /etc/kaizensc/bot/ssh-login-bot.flag; lines+=("0 * * * * bash /usr/local/rere/cek-login-ssh >/dev/null 2>&1"); fi
+    if ((${#lines[@]})); then (crontab -l 2>/dev/null; printf '%s\n' "${lines[@]}") | sort -u | crontab -; echo -e "${GREEN}Login notification is now ON.${NC}"; else echo -e "${RED}[ERROR] SSH login notification script not found.${NC}"; fi
+  fi
+}
+
+names=(); services=()
+add_service(){ unit_exists "$2" && { names+=("$1"); services+=("$2"); }; }
+build_services(){
+ names=(); services=()
+ add_service 'OpenSSH' ssh
+ add_service 'Dropbear' dropbear
+ add_service 'Nginx' nginx
+ add_service 'HAProxy' haproxy
+ add_service 'Xray VLESS' xray-vless
+ add_service 'Xray VMess' xray-vmess
+ add_service 'Xray Trojan' xray-trojan
+ add_service 'Quota Xray VLESS' xray-quota@vless
+ add_service 'Quota Xray VMess' xray-quota@vmess
+ add_service 'Quota Xray Trojan' xray-quota@trojan
+ add_service 'V2Ray Main Port' v2ray
+ add_service 'WebSocket ePro' multiplex
+ add_service 'SSH WebSocket' ws-stunnel
+ add_service 'SSH WebSocket Enhanced' ws-dual
+ add_service 'SSLH Multiplexer' sslh
+ add_service 'OpenVPN TCP' openvpn-server@server-tcp-1194
+ add_service 'OpenVPN UDP' openvpn-server@server-udp-2200
+ add_service 'SlowDNS' dnstt
+ add_service 'FastDNS' fastdns
+ add_service 'UDP Custom' udp-custom
+ add_service 'HTTP Proxy Squid' squid
+ add_service 'HTTP Proxy Squid3' squid3
+ add_service 'OHP OpenSSH' ohp-ssh
+ add_service 'OHP Dropbear' ohp-dropbear
+ add_service 'OHP OpenVPN' ohp-openvpn
+ add_service 'Socks5 Proxy (Dante)' danted
+ add_service 'Cron' cron
+}
+
+while true; do
+  build_services
+  clear; echo; kaizen_header ' • SERVICE MANAGER • '
+  for i in "${!services[@]}"; do
+    printf "  ${CYAN}[%02d]${NC} ${WHITE}%-30s${NC} %b\n" "$((i+1))" "${names[$i]}" "$(get_status "${services[$i]}")"
+  done
+  local_login=$(( ${#services[@]} + 1 ))
+  printf "  ${CYAN}[%02d]${NC} ${WHITE}%-30s${NC} %b\n" "$local_login" 'Login Notification Bot' "$(get_status_login_notif)"
+  back=$(( local_login + 1 ))
+  printf "  ${CYAN}[%02d]${NC} ${WHITE}Back to System VPS${NC}\n" "$back"
+  cmd; echo -e "  ${CYAN}[ x]${NC} ${WHITE}Exit${NC}"; cmd; echo
+  read -rp " $(echo -e "${WHITE}Select service:${NC} ")" choice
+  if [[ $choice =~ ^[Xx]$ ]]; then clear; exit 0; fi
+  if [[ $choice =~ ^[0-9]+$ ]] && (( choice == back )); then exec menu-system; fi
+  clear; echo; kaizen_header ' • SERVICE STATUS • '
+  if [[ $choice =~ ^[0-9]+$ ]] && (( choice == local_login )); then toggle_login_notif
+  elif [[ $choice =~ ^[0-9]+$ ]] && (( choice >= 1 && choice <= ${#services[@]} )); then toggle_service "${services[$((choice-1))]}"
+  else echo -e "${RED}Invalid option.${NC}"; fi
+  read -rp 'Press Enter to continue...' _
+done
+
+__KAIZEN_FN_SC1__
+chmod 0755 "$TMPDIR_PATCH/fn-sc1"
+
+cat > "$TMPDIR_PATCH/menu-system" <<'__KAIZEN_MENU_SYSTEM__'
+#!/usr/bin/env bash
+source /usr/local/rere/kaizen-ui 2>/dev/null || true
+RED='\e[0;31m'; GREEN='\e[0;32m'; YELLOW='\e[0;33m'; CYAN='\e[0;36m'; WHITE='\e[0;97m'; plain='\e[0m'; bgPutih='\e[0;47;30m'; keatas="${CYAN}│${plain}"
+cmd(){ printf '  '; local i; for i in {52..57} {57..52}; do printf "\e[38;5;${i}m────\e[0m"; done; echo; }
+invalid(){ echo; echo -e "${RED}Invalid option, please try again!${plain}"; sleep 1; }
+header(){ clear; echo; if declare -F kaizen_header >/dev/null; then kaizen_header " • $1 • "; else echo -e "${CYAN}┌─────────────────────────────────────────────────┐${plain}"; printf "${CYAN}│${plain}${bgPutih}%49s${plain}${CYAN}│${plain}\n" " $1"; echo -e "${CYAN}└─────────────────────────────────────────────────┘${plain}"; fi; }
+result_title(){ header "$1"; }
+
+change_banner(){
+ result_title 'CHANGE SSH BANNER'
+ read -rp 'Input your SSH banner: ' bns
+ printf '%s\n' "$bns" > /etc/issue.net
+ systemctl daemon-reload
+ for s in ssh sshd dropbear ws-stunnel multiplex ws-dual; do systemctl cat "$s" >/dev/null 2>&1 && systemctl restart "$s" >/dev/null 2>&1 || true; done
+ echo -e "${GREEN}SSH banner updated successfully.${plain}"
+}
+
+system_status(){
+ result_title 'SYSTEM STATUS'
+ local uptime_text cpu_load ram_total ram_used ram_pct disk_total disk_used disk_pct
+ uptime_text=$(uptime -p 2>/dev/null | sed 's/^up //' || echo '-')
+ cpu_load=$(awk '{print $1" / "$2" / "$3}' /proc/loadavg 2>/dev/null || echo '-')
+ ram_total=$(free -m | awk '/^Mem:/ {print $2}')
+ ram_used=$(free -m | awk '/^Mem:/ {print $3}')
+ if [[ ${ram_total:-0} -gt 0 ]]; then ram_pct=$((ram_used*100/ram_total)); else ram_pct=0; fi
+ read -r disk_total disk_used disk_pct < <(df -h / | awk 'NR==2 {print $2, $3, $5}')
+ echo -e "${WHITE}  Uptime      : ${GREEN}${uptime_text:-'-'}${plain}"
+ echo -e "${WHITE}  CPU Load    : ${GREEN}${cpu_load:-'-'}${plain}"
+ echo -e "${WHITE}  RAM Usage   : ${GREEN}${ram_used:-0} MB / ${ram_total:-0} MB (${ram_pct}%)${plain}"
+ echo -e "${WHITE}  SSD Usage   : ${GREEN}${disk_used:-'-'} / ${disk_total:-'-'} (${disk_pct:-'-'})${plain}"
+ echo -e "${WHITE}  CPU Cores   : ${GREEN}$(nproc 2>/dev/null || echo '-')${plain}"
+ echo -e "${WHITE}  Kernel      : ${GREEN}$(uname -r)${plain}"
+}
+
+restart_all(){
+ result_title 'RESTART ALL SERVICE'
+ echo -e "${WHITE}Restarting installed services...${plain}"; echo
+ services=(ssh sshd dropbear multiplex ws-stunnel ws-dual cron xray-vless xray-vmess xray-trojan haproxy sslh nginx openvpn dnstt udp-custom api v2ray xray-quota@vless xray-quota@vmess xray-quota@trojan)
+ for s in "${services[@]}"; do
+   if systemctl cat "$s" >/dev/null 2>&1; then
+     if systemctl restart "$s" >/dev/null 2>&1; then printf "${GREEN}[OK]${plain}   ${WHITE}%s${plain}\n" "$s"; else printf "${RED}[FAIL]${plain} ${WHITE}%s${plain}\n" "$s"; fi
+   fi
+ done
+ [[ -f /etc/xray/domargo ]] && systemctl cat cloudflared >/dev/null 2>&1 && systemctl restart cloudflared >/dev/null 2>&1 || true
+}
+
+choose_region(){
+ local region=$1 zones choice
+ mapfile -t zones < <(timedatectl list-timezones | grep -E "^${region}/")
+ ((${#zones[@]}>0)) || { result_title 'CHANGE TIMEZONE'; echo -e "${RED}No timezone found.${plain}"; return; }
+ while true; do
+   header "${region} TIMEZONES"
+   local i; for i in "${!zones[@]}"; do printf "  ${CYAN}[%02d]${plain} ${WHITE}%s${plain}\n" "$((i+1))" "${zones[$i]}"; done
+   cmd; echo -e "  ${CYAN}[ x]${plain} ${WHITE}Back${plain}"; cmd; echo
+   read -rp " $(echo -e "${WHITE}Select timezone:${plain} ")" choice
+   [[ "$choice" =~ ^[Xx]$ ]] && return
+   if [[ "$choice" =~ ^[0-9]+$ ]] && ((choice>=1 && choice<=${#zones[@]})); then
+     timedatectl set-timezone "${zones[$((choice-1))]}" && { result_title 'TIMEZONE UPDATED'; echo -e "${GREEN}Timezone changed to ${zones[$((choice-1))]}.${plain}"; }; return
+   fi
+   invalid
+ done
+}
+
+change_timezone(){
+ while true; do
+  header 'CHANGE TIMEZONE'
+  echo -e "  ${CYAN}[01]${plain} ${WHITE}Africa${plain}"
+  echo -e "  ${CYAN}[02]${plain} ${WHITE}America${plain}"
+  echo -e "  ${CYAN}[03]${plain} ${WHITE}Antarctica${plain}"
+  echo -e "  ${CYAN}[04]${plain} ${WHITE}Asia${plain}"
+  echo -e "  ${CYAN}[05]${plain} ${WHITE}Atlantic${plain}"
+  echo -e "  ${CYAN}[06]${plain} ${WHITE}Australia${plain}"
+  echo -e "  ${CYAN}[07]${plain} ${WHITE}Europe${plain}"
+  echo -e "  ${CYAN}[08]${plain} ${WHITE}Indian${plain}"
+  echo -e "  ${CYAN}[09]${plain} ${WHITE}Pacific${plain}"
+  echo -e "  ${CYAN}[10]${plain} ${WHITE}View Current Time Zone${plain}"
+  cmd; echo -e "  ${CYAN}[ x]${plain} ${WHITE}Back${plain}"; cmd; echo
+  read -rp " $(echo -e "${WHITE}Please select an option [01-10 or x]:${plain} ")" opt
+  case "$opt" in
+   1|01) choose_region Africa;; 2|02) choose_region America;; 3|03) choose_region Antarctica;; 4|04) choose_region Asia;;
+   5|05) choose_region Atlantic;; 6|06) choose_region Australia;; 7|07) choose_region Europe;; 8|08) choose_region Indian;; 9|09) choose_region Pacific;;
+   10) result_title 'CURRENT TIMEZONE'; timedatectl; read -rp 'Press Enter to continue...' _;; x|X) return;; *) invalid;;
+  esac
+ done
+}
+
+MREINSTALL_URL='https://raw.githubusercontent.com/rewasu91/Management-System/refs/heads/main/mreinstall'
+MREINSTALL_FILE='/root/mreinstall'
+
+rebuild_vps(){
+ result_title 'REINSTALL / REBUILD VPS'
+ echo -e "${WHITE}Downloading latest VPS reinstall manager...${plain}"
+ echo
+
+ if ! curl -fL --retry 3 --retry-delay 2 --connect-timeout 10 --max-time 60 \
+   "$MREINSTALL_URL" -o "$MREINSTALL_FILE"; then
+   echo
+   echo -e "${RED}Failed to download VPS reinstall manager.${plain}"
+   echo -e "${WHITE}Source:${plain}"
+   echo -e "${CYAN}${MREINSTALL_URL}${plain}"
+   echo
+   read -rp 'Press Enter to continue...' _
+   return
+ fi
+
+ if [[ ! -s "$MREINSTALL_FILE" ]]; then
+   echo -e "${RED}Downloaded reinstall manager is empty.${plain}"
+   rm -f "$MREINSTALL_FILE"
+   read -rp 'Press Enter to continue...' _
+   return
+ fi
+
+ chmod 700 "$MREINSTALL_FILE"
+
+ if ! bash -n "$MREINSTALL_FILE"; then
+   echo
+   echo -e "${RED}Downloaded reinstall manager failed Bash syntax validation.${plain}"
+   read -rp 'Press Enter to continue...' _
+   return
+ fi
+
+ clear
+ bash "$MREINSTALL_FILE"
+ local rc=$?
+
+ if (( rc != 0 )); then
+   echo
+   echo -e "${YELLOW}Reinstall manager exited with status ${rc}.${plain}"
+   read -rp 'Press Enter to continue...' _
+ fi
+}
+
+while true; do
+ header 'MENU SYSTEM VPS'
+ echo -e "  ${CYAN}[01]${plain} ${WHITE}Domain Manager${plain}"
+ echo -e "  ${CYAN}[02]${plain} ${WHITE}Backup Manager${plain}"
+ echo -e "  ${CYAN}[03]${plain} ${WHITE}Change Timezone${plain}"
+ echo -e "  ${CYAN}[04]${plain} ${WHITE}Restart All Service${plain}"
+ echo -e "  ${CYAN}[05]${plain} ${WHITE}Adjust Text Brightness${plain}"
+ echo -e "  ${CYAN}[06]${plain} ${WHITE}Check Streaming Country Status${plain}"
+ echo -e "  ${CYAN}[07]${plain} ${WHITE}Menu Bot Manager${plain}"
+ echo -e "  ${CYAN}[08]${plain} ${WHITE}ON/OFF IPV6${plain}"
+ echo -e "  ${CYAN}[09]${plain} ${WHITE}Reinstall / Rebuild VPS${plain}"
+ echo -e "  ${CYAN}[10]${plain} ${WHITE}Check Detail Port & Protocol${plain}"
+ echo -e "  ${CYAN}[11]${plain} ${WHITE}Check Status: Uptime, CPU, RAM & SSD${plain}"
+ echo -e "  ${CYAN}[12]${plain} ${WHITE}Setup Cloudflare Argo Tunnel Routing${plain}"
+ echo -e "  ${CYAN}[13]${plain} ${WHITE}Change SSH Banner${plain}"
+ echo -e "  ${CYAN}[14]${plain} ${WHITE}Setup Service (ON/OFF)${plain}"
+ echo -e "  ${CYAN}[15]${plain} ${WHITE}Menu API / REST API Support${plain}"
+ echo -e "  ${CYAN}[16]${plain} ${WHITE}Menu Admin VPS${plain}"
+ echo -e "  ${CYAN}[17]${plain} ${WHITE}Back to Main Menu${plain}"
+ cmd; echo -e "  ${CYAN}[ x]${plain} ${WHITE}Exit${plain}"; cmd; echo
+ read -rp " $(echo -e "${WHITE}Please select an option [01-17 or x]:${plain} ")" asu
+ case "$asu" in
+  1|01) menu-domain;; 2|02) bmenu;; 3|03) change_timezone;; 4|04) restart_all; read -rp 'Press Enter to continue...' _;;
+  5|05) adjust-text-brightness; exec menu-system;; 6|06) check-streaming-country;; 7|07) bot-menu;; 8|08) ipv6-control;; 9|09) rebuild_vps;;
+  10) detail; read -rp 'Press Enter to continue...' _;; 11) system_status; read -rp 'Press Enter to continue...' _;; 12) menu-argo;; 13) change_banner; read -rp 'Press Enter to continue...' _;; 14) fn-sc1;; 15) menu-api;; 16) menu-admin;; 17) exec menu;;
+  x|X) clear; exit 0;; *) invalid;;
+ esac
+done
+
+__KAIZEN_MENU_SYSTEM__
+chmod 0755 "$TMPDIR_PATCH/menu-system"
+
+cat > "$TMPDIR_PATCH/backup" <<'__KAIZEN_BACKUP__'
+#!/usr/bin/env bash
+source /usr/local/rere/kaizen-ui 2>/dev/null || true
+# SYSTEM_UI_TITLE_PATCH
+if [[ -t 1 ]] && declare -F kaizen_header >/dev/null; then
+  clear; echo; kaizen_header ' • BACKUP DATABASE • '
+fi
+# ========================================================
+# Credit Code By FN Project
+# Author: Rerechan02 (DindaPutriFN)
+# License: This configuration is licensed for personal or internal use only.
+#          Redistribution, resale, or reuse of this code in any form
+#          without explicit written permission from the author is prohibited.
+#          Selling this code or its derivatives is strictly forbidden.
+# ========================================================
+
+clear
+
+# Time variables
+tanggal=$(date +"%m-%d-%Y")
+waktu=$(date +"%H-%M-%S")  # Safe time format for filenames
+random_code=$(openssl rand -hex 4)  # Generate 4 bytes (8 hexadecimal characters)
+zip_file="/root/Backup-${random_code}-${tanggal}-${waktu}.zip"
+backup_dir="/root/backup"
+botToken=$(cat /etc/kaizensc/bot/notif/bot.key)
+chatId=$(cat /etc/kaizensc/bot/notif/client.id)
+#botToken=$(cat /usr/local/etc/v2ray/bot.key)
+#chatId=$(cat /usr/local/etc/v2ray/client.id)
+USERNAME="KaizenSC"
+
+# Authentication and server information
+domain=$(cat /etc/xray/domain 2>/dev/null || echo "Unknown")
+ipsaya=$(curl -s http://checkip.amazonaws.com)
+asn_info=$(timeout 5 curl -s "http://ip-api.com/json/$ipsaya" | jq -r '.isp // "Unknown ISP"')
+
+# Output color helpers
+green() { echo -e "\\033[0;32m${*}\\033[0m"; }
+red() { echo -e "\\033[0;31m${*}\\033[0m"; }
+
+echo -e "$(green "Starting Backup")"
+sleep 1
+
+# Create backup directory
+rm -rf "$backup_dir"
+mkdir -p "$backup_dir"
+
+# Copy files included in the backup
+sleep 1
+echo Start Backup 2>/dev/null
+rm -rf /root/backup 2>/dev/null
+mkdir /root/backup 2>/dev/null
+cp /etc/passwd /root/backup/ 2>/dev/null
+cp /etc/group /root/backup/ 2>/dev/null
+cp /etc/shadow /root/backup/ 2>/dev/null
+cp /etc/gshadow /root/backup/ 2>/dev/null
+# Core configuration and ALL account data/state
+cp -a /etc/xray /root/backup/xray 2>/dev/null || true
+cp -a /etc/kaizensc /root/backup/kaizensc 2>/dev/null || true
+cp -a /etc/shadowsocks-libev /root/backup/shadowsocks-libev 2>/dev/null || true
+cp -a /etc/haproxy /root/backup/haproxy 2>/dev/null || true
+cp -a /etc/nginx /root/backup/nginx 2>/dev/null || true
+cp -a /etc/openvpn /root/backup/openvpn 2>/dev/null || true
+cp -a /etc/letsencrypt /root/backup/letsencrypt 2>/dev/null || true
+cp -a /etc/systemd/system /root/backup/systemd-system 2>/dev/null || true
+cp /etc/crontab /root/backup/ 2>/dev/null || true
+cp -a /etc/cloudflared /root/backup/cloudflared 2>/dev/null || true
+cp -a /etc/zivpn /root/backup/zivpn 2>/dev/null || true
+cp -a ~/.cloudflared /root/backup/.cloudflared 2>/dev/null || true
+
+# Make a transaction-consistent snapshot of the Xray SQLite account database.
+# This contains credentials, expiry, IP/quota limits and lock state.
+XRAY_DB=/etc/kaizensc/database/xray/accounts.db
+if [[ -f "$XRAY_DB" ]] && command -v sqlite3 >/dev/null 2>&1; then
+    mkdir -p /root/backup/kaizensc/database/xray
+    rm -f /root/backup/kaizensc/database/xray/accounts.db-wal /root/backup/kaizensc/database/xray/accounts.db-shm 2>/dev/null || true
+    sqlite3 "$XRAY_DB" ".timeout 10000" ".backup '/root/backup/kaizensc/database/xray/accounts.db'" 2>/dev/null || cp -af "$XRAY_DB" /root/backup/kaizensc/database/xray/accounts.db
+fi
+
+# Manifest makes it easy to verify critical account data exists inside the ZIP.
+cat > /root/backup/BACKUP-MANIFEST.txt <<'EOF'
+Critical account data included:
+- /etc/kaizensc/database/ (SSH + Xray account databases)
+- /etc/kaizensc/limit/ (IP limits, quota limits, usage/cache state)
+- /etc/kaizensc/recovery/ (locked/recoverable Xray accounts)
+- /etc/kaizensc/xray/ (VLESS/VMess/Trojan split Xray configs and active clients)
+- /etc/xray/ (domain, certificates and Xray runtime files)
+- /etc/passwd, /etc/group, /etc/shadow, /etc/gshadow (SSH system accounts)
+- Shadowsocks/OpenVPN data where installed
+- HAProxy/Nginx/custom systemd configuration
+EOF
+cd /root
+
+# Create password-protected ZIP file
+zip -rP "KznAutoSC" "$zip_file" "backup"
+
+if [[ ! -f "$zip_file" ]]; then
+    echo -e "$(red "Failed to create ZIP file.")"
+    exit 1
+fi
+
+# Upload backup to Google Drive using rclone
+rclone copy "$zip_file" rerechan:backup/
+
+# Get the Google Drive file URL
+url=$(rclone link rerechan:backup/"$(basename "$zip_file")")
+
+if [[ -z "$url" ]]; then
+    link="-"
+    backup_id="-"
+else
+    # Extract the Google Drive backup file ID
+    backup_id=$(echo "$url" | grep -o 'id=[^&]*' | cut -d'=' -f2)
+    link="https://drive.google.com/u/4/uc?id=${backup_id}&export=download"
+fi
+
+# Combine backup information into one caption
+caption="🆔 Backup ID: $backup_id
+🖥 Server Information:
+┣ 📛 Username: $USERNAME
+┣ 🌐 Domain: $domain
+┣ 🏢 ISP: $asn_info
+┣ 🌍 IP VPS: $ipsaya
+┣ ⏰ Backup Time: $tanggal at $waktu
+┗━━━━━━━━━━━━━━━━━
+📥 Download Backup: $link
+🔒 Security: Backup file is protected with password (KznAutoSC).
+🔄 This backup is created automatically to help keep your data safe."
+
+# Send the backup file to Telegram with the full caption
+curl -s -X POST "https://api.telegram.org/bot$botToken/sendDocument" \
+     -F chat_id="$chatId" \
+     -F document=@"$zip_file" \
+     -F caption="$caption"
+
+# Remove the local ZIP and temporary backup directory after sending
+rm -f "$zip_file"
+rm -rf "$backup_dir"
+
+# Display backup details in the CLI
+clear
+echo -e "$(green "Backup and Telegram delivery completed.")"
+echo -e "$(green "Backup Details:")"
+echo -e "🆔 Backup ID: $backup_id"
+echo -e "🖥 Server Information:"
+echo -e "┣ 📛 Username: $USERNAME"
+echo -e "┣ 🌐 Domain: $domain"
+echo -e "┣ 🏢 ISP: $asn_info"
+echo -e "┣ 🌍 IP VPS: $ipsaya"
+echo -e "┣ ⏰ Backup Time: $tanggal at $waktu"
+echo -e "┗━━━━━━━━━━━━━━━━━"
+echo -e "📥 Download Backup: $link"
+echo -e "🔒 Security: Backup file is password protected."
+echo -e "🔄 This backup is created automatically to help keep your data safe."
+__KAIZEN_BACKUP__
+chmod 0755 "$TMPDIR_PATCH/backup"
+
+cat > "$TMPDIR_PATCH/restore" <<'__KAIZEN_RESTORE__'
+#!/usr/bin/env bash
+source /usr/local/rere/kaizen-ui 2>/dev/null || true
+# SYSTEM_UI_TITLE_PATCH
+if [[ -t 1 ]] && declare -F kaizen_header >/dev/null; then
+  clear; echo; kaizen_header ' • RESTORE DATABASE • '
+fi
+
+clear
+
+# Working directory
+backup_dir="/root"
+backup_file=$(ls $backup_dir/*.zip 2>/dev/null | head -n 1)
+
+# Output color helpers
+green() { echo -e "\\033[0;32m${*}\\033[0m"; }
+red() { echo -e "\\033[0;31m${*}\\033[0m"; }
+export NC='\033[0m'
+echo -e "$(green "Starting restore process...")"
+
+# Ensure required packages are installed
+# Use a dedicated virtual environment for Debian/Ubuntu PEP 668 compatibility.
+GDOWN_VENV="/root/.gdown-venv"
+GDOWN_BIN="$GDOWN_VENV/bin/gdown"
+if ! command -v python3 &>/dev/null; then
+    echo -e "$(green "Installing Python3...")"
+    apt update && apt install -y python3 python3-venv python3-pip || { echo -e "$(red "Failed to install Python3!")"; exit 1; }
+fi
+if [[ ! -x "$GDOWN_BIN" ]]; then
+    echo -e "$(green "Installing gdown...")"
+    apt update >/dev/null 2>&1
+    apt install -y python3-venv python3-pip >/dev/null 2>&1 || true
+    rm -rf "$GDOWN_VENV"
+    python3 -m venv "$GDOWN_VENV" || { echo -e "$(red "Failed to create the gdown virtual environment!")"; exit 1; }
+    "$GDOWN_VENV/bin/python" -m pip install --upgrade pip >/dev/null 2>&1 || true
+    "$GDOWN_VENV/bin/python" -m pip install --no-cache-dir gdown || { echo -e "$(red "Failed to install gdown!")"; exit 1; }
+fi
+
+# Check for an existing backup ZIP in /root
+if [[ -f "$backup_file" ]]; then
+    clear
+    echo -e "$(green "Backup file found: $backup_file")"
+else
+    # Ask for a Backup ID or URL
+    while [[ -z "$backup_url" ]]; do
+        clear
+        read -rp "No backup file found! Enter Backup ID or URL: " input
+
+        if [[ -z "$input" ]]; then
+            clear
+            echo -e "$(red "No Backup ID or URL was entered. Restore cancelled.")"
+            exit 1
+        fi
+
+        if [[ "$input" == https* ]]; then
+            backup_url="$input"
+        else
+            backup_url="https://drive.google.com/uc?id=${input}&export=download"
+        fi
+    done
+
+    # Download the backup file using the appropriate method.
+    # Google Drive uses gdown; GitHub/direct URLs use curl/wget.
+    download_target="$backup_dir/rebackup.zip"
+    rm -f "$download_target"
+
+    if [[ "$backup_url" == *"drive.google.com"* ]]; then
+        "$GDOWN_BIN" -O "$download_target" "$backup_url"
+        download_rc=$?
+    else
+        if command -v curl >/dev/null 2>&1; then
+            curl -fL --retry 5 --retry-delay 2 --connect-timeout 15 --max-time 600 \
+                -o "$download_target" "$backup_url"
+            download_rc=$?
+        elif command -v wget >/dev/null 2>&1; then
+            wget --tries=5 --timeout=30 -O "$download_target" "$backup_url"
+            download_rc=$?
+        else
+            echo -e "$(red "curl/wget is not installed!")"
+            exit 1
+        fi
+    fi
+
+    if [[ $download_rc -ne 0 || ! -s "$download_target" ]]; then
+        rm -f "$download_target"
+        echo -e "$(red "Failed to download the backup file!")"
+        exit 1
+    fi
+
+    # The backup uses a password-protected ZIP; unzip -t verifies
+    # that the downloaded file is a real backup ZIP and not an HTML/error page.
+    ZIP_PASSWORD="KznAutoSC"
+    if unzip -P "$ZIP_PASSWORD" -t "$download_target" >/dev/null 2>&1; then
+        :
+    elif unzip -P "Rerechan02" -t "$download_target" >/dev/null 2>&1; then
+        ZIP_PASSWORD="Rerechan02"
+    else
+        rm -f "$download_target"
+        echo -e "$(red "Backup file is invalid, damaged, or is not a valid ZIP file!")"
+        exit 1
+    fi
+
+    backup_file="$download_target"
+    echo -e "$(green "Backup file downloaded successfully: $backup_file")"
+fi
+
+# Detect backup password. New KaizenSC backups use KznAutoSC; legacy backups remain supported.
+if [[ -z "${ZIP_PASSWORD:-}" ]]; then
+    if unzip -P "KznAutoSC" -t "$backup_file" >/dev/null 2>&1; then
+        ZIP_PASSWORD="KznAutoSC"
+    elif unzip -P "Rerechan02" -t "$backup_file" >/dev/null 2>&1; then
+        ZIP_PASSWORD="Rerechan02"
+    else
+        echo -e "$(red "Backup password is invalid or the ZIP file is damaged!")"
+        exit 1
+    fi
+fi
+
+# Extract the backup file
+unzip -P "$ZIP_PASSWORD" -o "$backup_file" -d "$backup_dir"
+
+if [[ $? -ne 0 ]]; then
+    echo -e "$(red "Failed to extract the backup file!")"
+    exit 1
+fi
+
+# Restore files using the original directory structure
+echo -e "$(green "Starting data restoration...")"
+RESTORE_SRC="/root/backup"
+if [[ ! -d "$RESTORE_SRC" ]]; then
+    echo -e "$(red "Invalid backup structure: /root/backup was not found!")"
+    exit 1
+fi
+
+# System account files
+for f in passwd group shadow gshadow crontab; do
+    [[ -f "$RESTORE_SRC/$f" ]] && cp -af "$RESTORE_SRC/$f" "/etc/$f"
+done
+
+# Configuration directories; restore only when present in the backup
+restore_dir() {
+    local src="$1" dst="$2"
+    [[ -d "$src" ]] || return 0
+    mkdir -p "$dst"
+    cp -a "$src"/. "$dst"/
+}
+restore_dir "$RESTORE_SRC/xray" /etc/xray
+restore_dir "$RESTORE_SRC/kaizensc" /etc/kaizensc
+restore_dir "$RESTORE_SRC/shadowsocks-libev" /etc/shadowsocks-libev
+restore_dir "$RESTORE_SRC/haproxy" /etc/haproxy
+restore_dir "$RESTORE_SRC/nginx" /etc/nginx
+restore_dir "$RESTORE_SRC/openvpn" /etc/openvpn
+restore_dir "$RESTORE_SRC/letsencrypt" /etc/letsencrypt
+restore_dir "$RESTORE_SRC/systemd-system" /etc/systemd/system
+restore_dir "$RESTORE_SRC/cloudflared" /etc/cloudflared
+restore_dir "$RESTORE_SRC/.cloudflared" /root/.cloudflared
+restore_dir "$RESTORE_SRC/zivpn" /etc/zivpn
+
+echo -e "$(green "Restore completed. Cleaning temporary files...")"
+rm -rf "$RESTORE_SRC"
+[[ "$backup_file" == "/root/rebackup.zip" ]] && rm -f "$backup_file"
+
+clear
+echo -e "$(green "Cleanup completed. Restarting services...")"
+systemctl daemon-reload
+restart_if_exists() {
+    local unit="$1"
+    if systemctl cat "$unit" >/dev/null 2>&1; then
+        systemctl restart "$unit" >/dev/null 2>&1 || echo -e "$(red "Failed to restart $unit")"
+    fi
+}
+for svc in ssh sshd multiplex cron xray-vless xray-vmess xray-trojan xray-quota@vless xray-quota@vmess xray-quota@trojan haproxy v2ray sslh nginx ws-stunnel ws-dual; do
+    restart_if_exists "$svc"
+done
+
+# Re-enable Shadowsocks units only when the template unit and accounts exist.
+if [[ -f /etc/shadowsocks-libev/akun.conf ]]; then
+    while read -r username; do
+        [[ -n "$username" ]] || continue
+        for suffix in tls http; do
+            unit="shadowsocks-libev-server@${username}-${suffix}.service"
+            if systemctl cat "$unit" >/dev/null 2>&1; then
+                systemctl enable --now "$unit" >/dev/null 2>&1 || true
+            fi
+        done
+    done < <(awk '/###/ {print $2}' /etc/shadowsocks-libev/akun.conf | sort -u)
+fi
+clear
+
+clear
+# Check Argo Tunnel
+if [[ -f /etc/xray/domargo ]]; then
+# Install Cloudflared when Argo Tunnel data exists
+wget https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb
+sudo dpkg -i cloudflared-linux-amd64.deb
+rm -fr cloudflared-linux-amd64.deb
+cd
+cloudflared service uninstall
+cloudflared service install
+clear
+else
+clear
+fi
+
+echo -e "$(green "Restore completed and temporary files were removed.")"
+echo -e "$NC"
+__KAIZEN_RESTORE__
+chmod 0755 "$TMPDIR_PATCH/restore"
+
+cat > "$TMPDIR_PATCH/info" <<'__KAIZEN_INFO__'
+#!/usr/bin/env bash
+
+# === COLOUR ===
+export red='\033[0;31m'
+export NC='\033[0m'
+export cyan='\e[0;36m'
+export green='\e[0;32m'
+RED='\e[0;31m'
+GREEN='\e[0;32m'
+YELLOW='\e[0;33m'
+CYAN='\e[0;36m'
+WHITE='\e[0;97m'
+red='\e[0;31m'
+green='\e[0;32m'
+yellow='\e[0;33m'
+cyan='\e[0;36m'
+white='\e[0;97m'
+plain='\e[0m'
+bgPutih='\e[0;47;30m'
+keatas="${CYAN}│${plain}"
+
+# === RAINBOW LINE ===
+cmd() {
+    printf '  '
+    local i
+    for i in {52..57} {57..52}; do
+        printf "\e[38;5;${i}m────\e[0m"
+    done
+    echo
+}
+
+# === SAFE HELPERS ===
+read_file() {
+    [[ -r "$1" ]] && tr -d '\r\n' < "$1"
+}
+
+check_service() {
+    local svc="$1"
+    if systemctl is-active --quiet "$svc" 2>/dev/null; then
+        printf '%bONLINE%b' "$GREEN" "$NC"
+    else
+        printf '%bOFFLINE%b' "$RED" "$NC"
+    fi
+}
+
+check_any_service() {
+    local svc
+    for svc in "$@"; do
+        if systemctl is-active --quiet "$svc" 2>/dev/null; then
+            printf '%bONLINE%b' "$GREEN" "$NC"
+            return 0
+        fi
+    done
+    printf '%bOFFLINE%b' "$RED" "$NC"
+}
+
+count_xray() {
+    local proto="$1"
+    local n
+    n=$(/usr/local/rere/xray-account count "$proto" 2>/dev/null | tail -n1 | tr -dc '0-9')
+    printf '%s' "${n:-0}"
+}
+
+# === VPS INFO ===
+OS=$(hostnamectl 2>/dev/null | awk -F: '/Operating System/{sub(/^[[:space:]]+/,"",$2); print $2; exit}')
+[[ -z "$OS" && -r /etc/os-release ]] && OS=$(. /etc/os-release; printf '%s' "${PRETTY_NAME:-$NAME}")
+OS=${OS:-Unknown}
+RAM=$(free -m 2>/dev/null | awk '/Mem:/ {print $2; exit}')
+RAM=${RAM:-0}
+ISP=$(read_file /root/.isp)
+ISP=${ISP:-Unknown}
+DOMAIN=$(read_file /etc/xray/domain)
+DOMAIN=${DOMAIN:-Unknown}
+
+# === CLIENT DETAILS ===
+PERMISSION_URL='https://kznsc.kznvpn.com/izin.txt'
+LOCAL_IP=$(read_file /root/.ip)
+[[ -z "$LOCAL_IP" ]] && LOCAL_IP=$(curl -4 -fsS --max-time 4 ipinfo.io/ip 2>/dev/null || true)
+CLIENT_NAME='Unknown'
+CLIENT_IP=${LOCAL_IP:-Unknown}
+EXP_DATE='Unknown'
+DAYS_LEFT='0'
+
+calculate_remaining_days() {
+    local expired_date="$1" today expiry
+    today=$(date +%s)
+    expiry=$(date -d "$expired_date" +%s 2>/dev/null) || return 1
+    echo $(( (expiry - today) / 86400 ))
+}
+
+if [[ -n "$LOCAL_IP" ]]; then
+    PERMISSION_DATA=$(curl -fsS --max-time 8 "$PERMISSION_URL" 2>/dev/null || true)
+    if [[ -n "$PERMISSION_DATA" ]]; then
+        MATCH=$(printf '%s\n' "$PERMISSION_DATA" | awk -v ip="$LOCAL_IP" '$0 ~ /###/ && $3 == ip {print; exit}')
+        if [[ -n "$MATCH" ]]; then
+            CLIENT_NAME=$(awk '{print $2}' <<< "$MATCH")
+            CLIENT_IP=$(awk '{print $3}' <<< "$MATCH")
+            EXP_DATE=$(awk '{print $5}' <<< "$MATCH")
+            DAYS_LEFT=$(calculate_remaining_days "$EXP_DATE" 2>/dev/null || echo 0)
+        fi
+    fi
+fi
+
+# === BANDWIDTH USAGE FROM VNSTAT ===
+format_bytes() {
+    local bytes="${1:-0}"
+    awk -v b="$bytes" 'BEGIN {
+        if (b >= 1099511627776) printf "%.2f TB", b/1099511627776;
+        else if (b >= 1073741824) printf "%.2f GB", b/1073741824;
+        else if (b >= 1048576) printf "%.2f MB", b/1048576;
+        else if (b >= 1024) printf "%.2f KB", b/1024;
+        else printf "%.2f MB", b/1048576;
+    }'
+}
+
+TTODAY_BYTES=0
+TYEST_BYTES=0
+TMON_BYTES=0
+
+# Prefer vnStat JSON because it is stable across vnStat display formats.
+if command -v vnstat >/dev/null 2>&1 && command -v jq >/dev/null 2>&1; then
+    VNJSON=$(vnstat --json 2>/dev/null || true)
+    if [[ -n "$VNJSON" ]]; then
+        TTODAY_BYTES=$(jq '[.interfaces[].traffic.day // [] | .[] | select(.date.year == (now|strftime("%Y")|tonumber) and .date.month == (now|strftime("%m")|tonumber) and .date.day == (now|strftime("%d")|tonumber)) | (.rx + .tx)] | add // 0' <<< "$VNJSON" 2>/dev/null || echo 0)
+        TYEST_BYTES=$(jq '[.interfaces[].traffic.day // [] | .[] | select((.date.year|tostring)+"-"+(.date.month|tostring)+"-"+(.date.day|tostring) == ((now-86400)|strftime("%Y-%-m-%-d"))) | (.rx + .tx)] | add // 0' <<< "$VNJSON" 2>/dev/null || echo 0)
+        TMON_BYTES=$(jq '[.interfaces[].traffic.month // [] | .[] | select(.date.year == (now|strftime("%Y")|tonumber) and .date.month == (now|strftime("%m")|tonumber)) | (.rx + .tx)] | add // 0' <<< "$VNJSON" 2>/dev/null || echo 0)
+    fi
+fi
+
+ttoday=$(format_bytes "$TTODAY_BYTES")
+tyest=$(format_bytes "$TYEST_BYTES")
+tmon=$(format_bytes "$TMON_BYTES")
+
+# === SERVICE STATUS ===
+status_xray_vless=$(check_service xray-vless)
+status_xray_vmess=$(check_service xray-vmess)
+status_xray_trojan=$(check_service xray-trojan)
+status_ssh=$(check_any_service ssh sshd)
+status_openvpn=$(check_any_service openvpn-server@server-tcp-1194 openvpn)
+status_sshws=$(check_service ws-stunnel)
+status_dropbear=$(check_service dropbear)
+status_sslh=$(check_service sslh)
+status_nginx=$(check_service nginx)
+status_haproxy=$(check_service haproxy)
+status_shadowsocks=$(check_any_service shadowsocks-libev shadowsocks-libev.service)
+
+# === TOTAL ACTIVE USERS ===
+xray_vless_user=$(count_xray vless)
+xray_vmess_user=$(count_xray vmess)
+xray_trojan_user=$(count_xray trojan)
+ssh_dropbear_user=$(awk -F: '$3 >= 1000 && $1 != "nobody" && $7 !~ /(nologin|false)$/ {n++} END{print n+0}' /etc/passwd 2>/dev/null)
+ss_user=$(grep -c '###' /etc/shadowsocks-libev/akun.conf 2>/dev/null || true)
+ssh_dropbear_user=${ssh_dropbear_user:-0}
+ss_user=${ss_user:-0}
+
+# === DISPLAY INFORMATION ===
+clear
+echo -e ''
+echo -e "${CYAN}┌─────────────────────────────────────────────────┐${plain}"
+echo -e "${keatas} ${bgPutih}           • VPS DETAIL INFORMATION •          ${plain} ${keatas}"
+echo -e "${CYAN}└─────────────────────────────────────────────────┘${plain}"
+echo -e "${white}  OS               : $OS"
+echo -e "${white}  RAM              : ${RAM} MB"
+echo -e "${white}  ISP              : $ISP"
+echo -e "${white}  Domain           : $DOMAIN"
+echo -e "${white}  Usage Today      : ${GREEN}$ttoday${white}"
+echo -e "${white}  Usage Yesterday  : ${GREEN}$tyest${white}"
+echo -e "${white}  Usage Monthly    : ${GREEN}$tmon${NC}"
+echo -e "${CYAN}┌─────────────────────────────────────────────────┐${plain}"
+echo -e "${keatas} ${bgPutih}               • SERVICE STATUS •              ${plain} ${keatas}"
+echo -e "${CYAN}└─────────────────────────────────────────────────┘${plain}"
+printf "${white}   %-11s : %-7b   ${white}%-11s : %-7b\n" "Xray VLESS" "$status_xray_vless" "Dropbear" "$status_dropbear"
+printf "${white}   %-11s : %-7b   ${white}%-11s : %-7b\n" "Xray VMess" "$status_xray_vmess" "SSLH" "$status_sslh"
+printf "${white}   %-11s : %-7b   ${white}%-11s : %-7b\n" "Xray Trojan" "$status_xray_trojan" "Nginx" "$status_nginx"
+printf "${white}   %-11s : %-7b   ${white}%-11s : %-7b\n" "SSH" "$status_ssh" "Haproxy" "$status_haproxy"
+printf "${white}   %-11s : %-7b\n" "Shadowsocks" "$status_shadowsocks"
+echo -e "${CYAN}┌─────────────────────────────────────────────────┐${plain}"
+echo -e "${keatas} ${bgPutih}                • TOTAL ACCOUNT •              ${plain} ${keatas}"
+echo -e "${CYAN}└─────────────────────────────────────────────────┘${plain}"
+printf "${white}     %-12s : %s   %-12s : %s\n" "SSH/Dropbear" "$ssh_dropbear_user" "Xray VLESS" "$xray_vless_user"
+printf "${white}     %-12s : %s   %-12s : %s\n" "Xray VMess" "$xray_vmess_user" "Xray Trojan" "$xray_trojan_user"
+printf "${white}     %-12s : %s\n" "Shadowsocks" "$ss_user"
+echo -e "${CYAN}┌─────────────────────────────────────────────────┐${plain}"
+echo -e "${keatas} ${bgPutih}               • CLIENT DETAILS •              ${plain} ${keatas}"
+echo -e "${CYAN}└─────────────────────────────────────────────────┘${plain}"
+echo -e "${white}  Username   : ${GREEN}$CLIENT_NAME${white}"
+echo -e "${white}  IP Address : ${GREEN}$CLIENT_IP"
+if [[ "$EXP_DATE" != 'Unknown' ]]; then
+    echo -e "${white}  Expire     : ${GREEN}$EXP_DATE${white} (${YELLOW}${DAYS_LEFT} ${white}days left)${NC}"
+else
+    echo -e "${white}  Expire     : ${YELLOW}Unknown${NC}"
+fi
+cmd
+echo -e "            ${white} To access, use ${GREEN}menu${NC} command"
+cmd
+
+__KAIZEN_INFO__
+chmod 0755 "$TMPDIR_PATCH/info"
+
+
+RERE='/usr/local/rere'
+STAMP="$(date +%Y%m%d-%H%M%S)"
+BACKUP_DIR="/root/kaizensc-remove-noobz-backup-${STAMP}"
+SELF_DIR="$TMPDIR_PATCH"
+
+if [[ ${EUID:-$(id -u)} -ne 0 ]]; then
+  echo "Please run this patch as root."
+  exit 1
+fi
+
+[[ -d "$RERE" ]] || { echo "KaizenSC directory not found: $RERE"; exit 1; }
+
+mkdir -p "$BACKUP_DIR/rere"
+
+# Back up all files that will be changed/removed.
+for f in menu menu-vless menu-vmess menu-trojan menu-xray fn-sc1 menu-system backup restore info \
+         add-noobz cek-login-noobz change-port-noobzvpn config-noobz cpb-noobz cpi-noobz \
+         cpu-noobz cpw-noobz ex-noobz list-noobz menu-noobz rbd-noobz ubl-noobz xp-noobz; do
+  [[ -e "$RERE/$f" ]] && cp -a "$RERE/$f" "$BACKUP_DIR/rere/"
+done
+[[ -d /etc/noobzvpns ]] && cp -a /etc/noobzvpns "$BACKUP_DIR/" || true
+[[ -d /etc/kaizensc/config/noobz ]] && {
+  mkdir -p "$BACKUP_DIR/kaizensc-config"
+  cp -a /etc/kaizensc/config/noobz "$BACKUP_DIR/kaizensc-config/"
+} || true
+[[ -f /etc/systemd/system/noobzvpns.service ]] && cp -a /etc/systemd/system/noobzvpns.service "$BACKUP_DIR/" || true
+[[ -x /usr/bin/noobzvpns ]] && cp -a /usr/bin/noobzvpns "$BACKUP_DIR/" || true
+[[ -f /etc/crontab ]] && cp -a /etc/crontab "$BACKUP_DIR/crontab" || true
+crontab -l > "$BACKUP_DIR/root-crontab" 2>/dev/null || true
+
+echo "[1/6] Stopping and removing Noobz service..."
+systemctl disable --now noobzvpns.service >/dev/null 2>&1 || true
+rm -f /etc/systemd/system/noobzvpns.service
+find /etc/systemd/system -type l -lname '*noobzvpns*' -delete 2>/dev/null || true
+
+echo "[2/6] Removing Noobz cron/login notification references..."
+if [[ -f /etc/crontab ]]; then
+  sed -i '/noobz/Id' /etc/crontab
+fi
+if crontab -l >/tmp/kaizensc-root-cron.$$ 2>/dev/null; then
+  grep -vi 'noobz' /tmp/kaizensc-root-cron.$$ | crontab - || true
+  rm -f /tmp/kaizensc-root-cron.$$
+fi
+rm -f /etc/kaizensc/bot/noobz-login-bot.flag
+
+echo "[3/6] Removing Noobz binary, database, Nginx path and scripts..."
+rm -rf /etc/noobzvpns /etc/kaizensc/config/noobz
+rm -f /usr/bin/noobzvpns /usr/local/bin/noobzvpns
+rm -f "$RERE"/add-noobz \
+      "$RERE"/cek-login-noobz \
+      "$RERE"/change-port-noobzvpn \
+      "$RERE"/config-noobz \
+      "$RERE"/cpb-noobz \
+      "$RERE"/cpi-noobz \
+      "$RERE"/cpu-noobz \
+      "$RERE"/cpw-noobz \
+      "$RERE"/ex-noobz \
+      "$RERE"/list-noobz \
+      "$RERE"/menu-noobz \
+      "$RERE"/rbd-noobz \
+      "$RERE"/ubl-noobz \
+      "$RERE"/xp-noobz \
+      "$RERE"/menu-xray
+
+echo "[4/6] Installing updated KaizenSC menus/system scripts..."
+for f in menu menu-vless menu-vmess menu-trojan fn-sc1 menu-system backup restore info; do
+  [[ -f "$SELF_DIR/$f" ]] || { echo "Missing patch payload: $f"; exit 1; }
+  install -m 0755 "$SELF_DIR/$f" "$RERE/$f"
+done
+
+echo "[5/6] Validating scripts and Nginx..."
+for f in menu menu-vless menu-vmess menu-trojan fn-sc1 menu-system backup restore info; do
+  bash -n "$RERE/$f"
+done
+
+systemctl daemon-reload
+if command -v nginx >/dev/null 2>&1; then
+  if nginx -t; then
+    systemctl reload nginx >/dev/null 2>&1 || systemctl restart nginx
+  else
+    echo "[WARNING] Nginx validation failed. Existing Nginx was not restarted."
+  fi
+fi
+systemctl restart cron >/dev/null 2>&1 || true
+
+echo "[6/6] Final Noobz audit..."
+remaining=0
+if grep -RniI -E 'noobz|noobzvpn|noobzvpns' "$RERE" /etc/kaizensc/config /etc/crontab 2>/dev/null; then
+  remaining=1
+fi
+if [[ $remaining -eq 0 ]]; then
+  echo "No Noobz references remain in KaizenSC runtime scripts/config."
+else
+  echo "[WARNING] A Noobz text reference is still present above. Review before deleting backup."
+fi
+
+echo
+echo "Patch completed."
+echo "Backup saved at: $BACKUP_DIR"
+echo
+echo "New main menu:"
+echo "  1. Menu SSH             6. Menu Wireguard"
+echo "  2. Menu Vless           7. Menu ZiVPN"
+echo "  3. Menu Vmess           8. Menu SlowDNS/UDP"
+echo "  4. Menu Trojan          9. Menu System VPS"
+echo "  5. Menu Shadowsocks     x. Exit"
