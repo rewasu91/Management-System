@@ -1,0 +1,113 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+OLD=/usr/local/rere
+NEW=/usr/local/kaisc
+STAMP="$(date +%Y%m%d-%H%M%S)"
+SAVE="/root/kaisc-path-migration-${STAMP}"
+
+[[ ${EUID:-$(id -u)} -eq 0 ]] || { echo "Run this migration as root."; exit 1; }
+
+mkdir -p "$SAVE"
+
+[[ -f /etc/crontab ]] && cp -a /etc/crontab "$SAVE/crontab" || true
+[[ -f /root/.bashrc ]] && cp -a /root/.bashrc "$SAVE/root.bashrc" || true
+[[ -d /etc/systemd/system ]] && cp -a /etc/systemd/system "$SAVE/systemd-system" || true
+[[ -f /usr/local/bin/server ]] && cp -a /usr/local/bin/server "$SAVE/server" || true
+
+if [[ -d "$OLD" && ! -e "$NEW" ]]; then
+    mv "$OLD" "$NEW"
+elif [[ -d "$OLD" && -d "$NEW" ]]; then
+    cp -a "$OLD"/. "$NEW"/
+    rm -rf "$OLD"
+elif [[ ! -d "$OLD" && -d "$NEW" ]]; then
+    :
+else
+    echo "KaizenSC script directory was not found at $OLD or $NEW."
+    exit 1
+fi
+
+replace_exact_path() {
+    local target="$1"
+    [[ -e "$target" ]] || return 0
+
+    if [[ -f "$target" ]]; then
+        if grep -Iq '/usr/local/rere' "$target" 2>/dev/null; then
+            sed -i 's#/usr/local/rere#/usr/local/kaisc#g' "$target"
+        fi
+        return 0
+    fi
+
+    while IFS= read -r -d '' file; do
+        sed -i 's#/usr/local/rere#/usr/local/kaisc#g' "$file"
+    done < <(grep -RIlZ '/usr/local/rere' "$target" 2>/dev/null || true)
+}
+
+replace_exact_path "$NEW"
+replace_exact_path /usr/local/bin
+replace_exact_path /usr/local/sbin
+replace_exact_path /etc/systemd/system
+replace_exact_path /etc/cron.d
+replace_exact_path /etc/crontab
+replace_exact_path /root/.bashrc
+replace_exact_path /etc/profile
+replace_exact_path /etc/profile.d
+
+chmod -R a+rX "$NEW"
+find "$NEW" -type f -exec sh -c '
+    for f; do
+        if head -c 100 "$f" 2>/dev/null | grep -q "^#!"; then
+            chmod 0755 "$f" 2>/dev/null || true
+        fi
+    done
+' sh {} +
+
+if [[ -f /root/.bashrc ]]; then
+    sed -i '\#PATH=/usr/local/rere:#d' /root/.bashrc
+    if ! grep -Fq 'PATH=/usr/local/kaisc:$PATH' /root/.bashrc; then
+        printf '%s\n' 'PATH=/usr/local/kaisc:$PATH' >> /root/.bashrc
+    fi
+fi
+
+fail=0
+while IFS= read -r -d '' f; do
+    head_data=$(head -c 120 "$f" 2>/dev/null || true)
+    if [[ "$head_data" == '#!'*bash* || "$head_data" == '#!'*/sh* ]]; then
+        if ! bash -n "$f"; then
+            echo "[ERROR] Bash syntax failed: $f"
+            fail=1
+        fi
+    fi
+done < <(find "$NEW" -type f -print0)
+(( fail == 0 )) || exit 1
+
+remaining=0
+for target in "$NEW" /usr/local/bin /usr/local/sbin /etc/systemd/system /etc/cron.d /etc/crontab /root/.bashrc /etc/profile /etc/profile.d; do
+    [[ -e "$target" ]] || continue
+    if [[ -f "$target" ]]; then
+        if grep -Iq '/usr/local/rere' "$target" 2>/dev/null; then
+            echo "[ERROR] Old path remains in $target"
+            remaining=1
+        fi
+    else
+        mapfile -t hits < <(grep -RIl '/usr/local/rere' "$target" 2>/dev/null || true)
+        if ((${#hits[@]})); then
+            echo "[ERROR] Old path still exists under $target"
+            printf '  %s\n' "${hits[@]}"
+            remaining=1
+        fi
+    fi
+done
+(( remaining == 0 )) || exit 1
+
+systemctl daemon-reload >/dev/null 2>&1 || true
+systemctl restart cron >/dev/null 2>&1 || systemctl restart crond >/dev/null 2>&1 || true
+systemctl restart api >/dev/null 2>&1 || true
+hash -r 2>/dev/null || true
+
+echo
+echo "Migration completed successfully."
+echo "Old path : /usr/local/rere"
+echo "New path : /usr/local/kaisc"
+echo "Backup   : $SAVE"
+echo "All known KaizenSC runtime references now use /usr/local/kaisc."
