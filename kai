@@ -10,11 +10,17 @@ SAVE="/root/kaisc-path-migration-${STAMP}"
 
 mkdir -p "$SAVE"
 
+if ! command -v file >/dev/null 2>&1; then
+    apt-get update -qq
+    DEBIAN_FRONTEND=noninteractive apt-get install -y file >/dev/null
+fi
+
 [[ -f /etc/crontab ]] && cp -a /etc/crontab "$SAVE/crontab" || true
 [[ -f /root/.bashrc ]] && cp -a /root/.bashrc "$SAVE/root.bashrc" || true
 [[ -d /etc/systemd/system ]] && cp -a /etc/systemd/system "$SAVE/systemd-system" || true
 [[ -f /usr/local/bin/server ]] && cp -a /usr/local/bin/server "$SAVE/server" || true
 
+# Move or reconcile directory safely.
 if [[ -d "$OLD" && ! -e "$NEW" ]]; then
     mv "$OLD" "$NEW"
 elif [[ -d "$OLD" && -d "$NEW" ]]; then
@@ -23,7 +29,7 @@ elif [[ -d "$OLD" && -d "$NEW" ]]; then
 elif [[ ! -d "$OLD" && -d "$NEW" ]]; then
     :
 else
-    echo "KaizenSC script directory was not found at $OLD or $NEW."
+    echo "KaizenSC directory was not found at $OLD or $NEW."
     exit 1
 fi
 
@@ -32,6 +38,7 @@ replace_exact_path() {
     [[ -e "$target" ]] || return 0
 
     if [[ -f "$target" ]]; then
+        # Only text files are edited.
         if grep -Iq '/usr/local/rere' "$target" 2>/dev/null; then
             sed -i 's#/usr/local/rere#/usr/local/kaisc#g' "$target"
         fi
@@ -53,15 +60,23 @@ replace_exact_path /root/.bashrc
 replace_exact_path /etc/profile
 replace_exact_path /etc/profile.d
 
-chmod -R a+rX "$NEW"
-find "$NEW" -type f -exec sh -c '
-    for f; do
-        if head -c 100 "$f" 2>/dev/null | grep -q "^#!"; then
-            chmod 0755 "$f" 2>/dev/null || true
-        fi
-    done
-' sh {} +
+# Make scripts executable without reading binary content into shell variables.
+find "$NEW" -type f -print0 | while IFS= read -r -d '' file; do
+    # file(1) is binary-safe and does not pass NUL bytes through command substitution.
+    mime=$(file -b --mime-type "$file" 2>/dev/null || true)
+    case "$mime" in
+        text/*|application/x-shellscript|application/json|application/x-python|application/xml)
+            first_line=$(sed -n '1p' "$file" 2>/dev/null || true)
+            case "$first_line" in
+                '#!'*) chmod 0755 "$file" 2>/dev/null || true ;;
+            esac
+            ;;
+    esac
+done
 
+chmod -R a+rX "$NEW"
+
+# Root PATH.
 if [[ -f /root/.bashrc ]]; then
     sed -i '\#PATH=/usr/local/rere:#d' /root/.bashrc
     if ! grep -Fq 'PATH=/usr/local/kaisc:$PATH' /root/.bashrc; then
@@ -69,33 +84,42 @@ if [[ -f /root/.bashrc ]]; then
     fi
 fi
 
+# Validate Bash scripts using file(1), no binary command-substitution.
 fail=0
 while IFS= read -r -d '' f; do
-    head_data=$(head -c 120 "$f" 2>/dev/null || true)
-    if [[ "$head_data" == '#!'*bash* || "$head_data" == '#!'*/sh* ]]; then
-        if ! bash -n "$f"; then
-            echo "[ERROR] Bash syntax failed: $f"
-            fail=1
-        fi
-    fi
+    mime=$(file -b --mime-type "$f" 2>/dev/null || true)
+    case "$mime" in
+        text/*|application/x-shellscript)
+            first_line=$(sed -n '1p' "$f" 2>/dev/null || true)
+            case "$first_line" in
+                *bash*|*'/sh')
+                    if ! bash -n "$f"; then
+                        echo "[ERROR] Bash syntax failed: $f"
+                        fail=1
+                    fi
+                    ;;
+            esac
+            ;;
+    esac
 done < <(find "$NEW" -type f -print0)
 (( fail == 0 )) || exit 1
 
+# Verify the old exact path is gone from active text files.
 remaining=0
 for target in "$NEW" /usr/local/bin /usr/local/sbin /etc/systemd/system /etc/cron.d /etc/crontab /root/.bashrc /etc/profile /etc/profile.d; do
     [[ -e "$target" ]] || continue
+
     if [[ -f "$target" ]]; then
         if grep -Iq '/usr/local/rere' "$target" 2>/dev/null; then
             echo "[ERROR] Old path remains in $target"
             remaining=1
         fi
     else
-        mapfile -t hits < <(grep -RIl '/usr/local/rere' "$target" 2>/dev/null || true)
-        if ((${#hits[@]})); then
-            echo "[ERROR] Old path still exists under $target"
-            printf '  %s\n' "${hits[@]}"
+        while IFS= read -r hit; do
+            [[ -n "$hit" ]] || continue
+            echo "[ERROR] Old path remains in $hit"
             remaining=1
-        fi
+        done < <(grep -RIl '/usr/local/rere' "$target" 2>/dev/null || true)
     fi
 done
 (( remaining == 0 )) || exit 1
@@ -103,11 +127,11 @@ done
 systemctl daemon-reload >/dev/null 2>&1 || true
 systemctl restart cron >/dev/null 2>&1 || systemctl restart crond >/dev/null 2>&1 || true
 systemctl restart api >/dev/null 2>&1 || true
+
 hash -r 2>/dev/null || true
 
 echo
 echo "Migration completed successfully."
-echo "Old path : /usr/local/rere"
-echo "New path : /usr/local/kaisc"
-echo "Backup   : $SAVE"
-echo "All known KaizenSC runtime references now use /usr/local/kaisc."
+echo "Path: /usr/local/kaisc"
+echo "Previous configuration backup: $SAVE"
+echo "No active /usr/local/rere reference remains."
