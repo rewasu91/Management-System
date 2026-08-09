@@ -2,11 +2,10 @@
 set -euo pipefail
 RERE=/usr/local/rere
 STAMP="$(date +%Y%m%d-%H%M%S)"
-BACKUP="/root/kaizensc-never-ul-ip3-backup-${STAMP}"
+BACKUP="/root/kaizensc-dynamic-table-backup-${STAMP}"
 
 [[ ${EUID:-$(id -u)} -eq 0 ]] || { echo "Please run as root."; exit 1; }
 [[ -d "$RERE" ]] || { echo "KaizenSC not found: $RERE"; exit 1; }
-
 mkdir -p "$BACKUP"
 
 [[ -f "$RERE/kaizen-ui" ]] && cp -a "$RERE/kaizen-ui" "$BACKUP/kaizen-ui" || true
@@ -51,23 +50,126 @@ kaizen_is_ssh_account_user(){
  uid=$(printf '%s' "$e"|awk -F: '{print $3}'); [[ "$uid" =~ ^[0-9]+$ ]] || return 1
  (( uid >= 1000 && uid != 65534 ))
 }
-kaizen_ssh_table_header(){
- local c r bg='\e[0;47;30m'; c=$(kaizen_table_colour); r=$(kaizen_reset)
- printf '%b┌──────────────────┬──────────────┬─────┐%b\n' "$c" "$r"
- printf '%b│%b%b %-16s %b%b│%b%b %-12s %b%b│%b%b %-3s %b%b│%b\n' "$c" "$r" "$bg" Username "$r" "$c" "$r" "$bg" "Expire Date" "$r" "$c" "$r" "$bg" "IP" "$r" "$c" "$r"
- printf '%b├──────────────────┼──────────────┼─────┤%b\n' "$c" "$r"
+kaizen_repeat_line(){ local ch="$1" n="$2" out='' i; for ((i=0;i<n;i++)); do out+="$ch"; done; printf '%s' "$out"; }
+
+# Minimum widths requested by KaizenSC. Columns automatically grow when data
+# is longer, so values are never truncated just to fit the default box.
+KZN_SSH_USER_W=16
+KZN_SSH_EXP_W=11
+KZN_SSH_IP_W=2
+KZN_XRAY_USER_W=16
+KZN_XRAY_EXP_W=11
+KZN_XRAY_QUOTA_W=7
+KZN_XRAY_IP_W=2
+
+kaizen_fmt_bytes_table(){
+ local b="${1:-0}"
+ [[ "$b" =~ ^[0-9]+$ ]] || b=0
+ awk -v b="$b" 'BEGIN {
+   if (b >= 1073741824) {v=b/1073741824; u="GB"}
+   else if (b >= 1048576) {v=b/1048576; u="MB"}
+   else if (b >= 1024) {v=b/1024; u="KB"}
+   else {v=b; u="B"}
+   if (v == int(v)) printf "%.0f %s", v, u;
+   else if (v < 10) printf "%.2f %s", v, u;
+   else printf "%.1f %s", v, u;
+ }'
 }
-kaizen_ssh_table_row(){ local c w r; c=$(kaizen_table_colour); w=$(kaizen_text_colour); r=$(kaizen_reset); printf '%b│%b %-16.16s %b│%b %-12.12s %b│%b %-3.3s %b│%b\n' "$c" "$w" "$1" "$c" "$w" "$2" "$c" "$w" "$3" "$c" "$r"; }
-kaizen_ssh_table_footer(){ local c r; c=$(kaizen_table_colour); r=$(kaizen_reset); printf '%b└──────────────────┴──────────────┴─────┘%b\n' "$c" "$r"; }
+
+kaizen_ssh_table_prepare(){
+ KZN_SSH_USER_W=16; KZN_SSH_EXP_W=11; KZN_SSH_IP_W=2
+ local db=/etc/kaizensc/database/ssh/database.json u exp lim iptxt n
+ [[ -s "$db" ]] || return 0
+ while IFS=$'\t' read -r u exp lim; do
+   kaizen_is_ssh_account_user "$u" || continue
+   exp="${exp%% *}"
+   [[ "$lim" =~ ^[0-9]+$ ]] || lim=0
+   (( lim > 0 )) && iptxt="$lim" || iptxt='UL'
+   n=${#u}; (( n > KZN_SSH_USER_W )) && KZN_SSH_USER_W=$n
+   n=${#exp}; (( n > KZN_SSH_EXP_W )) && KZN_SSH_EXP_W=$n
+   n=${#iptxt}; (( n > KZN_SSH_IP_W )) && KZN_SSH_IP_W=$n
+ done < <(jq -r '.[] | [.Username, (.Expired // "Lifetime"), (.LimitIP // 0)] | @tsv' "$db" 2>/dev/null)
+}
+
+kaizen_xray_table_prepare(){
+ local proto="${1:-}" db=/etc/kaizensc/database/xray/accounts.db email u exp lim quota iptxt qtxt n
+ KZN_XRAY_USER_W=16; KZN_XRAY_EXP_W=11; KZN_XRAY_QUOTA_W=7; KZN_XRAY_IP_W=2
+ [[ -n "$proto" && -s "$db" ]] || return 0
+ while IFS='|' read -r email exp lim quota; do
+   [[ -n "$email" ]] || continue
+   u="${email%@*}"; exp="${exp%% *}"
+   [[ "$lim" =~ ^[0-9]+$ ]] || lim=0
+   [[ "$quota" =~ ^[0-9]+$ ]] || quota=0
+   (( lim > 0 )) && iptxt="$lim" || iptxt='UL'
+   (( quota > 0 )) && qtxt="$(kaizen_fmt_bytes_table "$quota")" || qtxt='UL'
+   n=${#u}; (( n > KZN_XRAY_USER_W )) && KZN_XRAY_USER_W=$n
+   n=${#exp}; (( n > KZN_XRAY_EXP_W )) && KZN_XRAY_EXP_W=$n
+   n=${#qtxt}; (( n > KZN_XRAY_QUOTA_W )) && KZN_XRAY_QUOTA_W=$n
+   n=${#iptxt}; (( n > KZN_XRAY_IP_W )) && KZN_XRAY_IP_W=$n
+ done < <(sqlite3 -separator '|' "$db" "SELECT email,expired,ip_limit,quota_bytes FROM accounts WHERE protocol='$proto' ORDER BY email;" 2>/dev/null)
+}
+
+kaizen_ssh_table_header(){
+ kaizen_ssh_table_prepare
+ local c r bg='\e[0;47;30m' a b d
+ c=$(kaizen_table_colour); r=$(kaizen_reset)
+ a=$(kaizen_repeat_line '─' $((KZN_SSH_USER_W+2)))
+ b=$(kaizen_repeat_line '─' $((KZN_SSH_EXP_W+2)))
+ d=$(kaizen_repeat_line '─' $((KZN_SSH_IP_W+2)))
+ printf '%b┌%s┬%s┬%s┐%b\n' "$c" "$a" "$b" "$d" "$r"
+ printf '%b│%b%b %-*s %b%b│%b%b %-*s %b%b│%b%b %-*s %b%b│%b\n' \
+   "$c" "$r" "$bg" "$KZN_SSH_USER_W" Username "$r" "$c" \
+   "$r" "$bg" "$KZN_SSH_EXP_W" "Expire Date" "$r" "$c" \
+   "$r" "$bg" "$KZN_SSH_IP_W" "IP" "$r" "$c" "$r"
+ printf '%b├%s┼%s┼%s┤%b\n' "$c" "$a" "$b" "$d" "$r"
+}
+kaizen_ssh_table_row(){
+ local c w r exp; c=$(kaizen_table_colour); w=$(kaizen_text_colour); r=$(kaizen_reset); exp="${2%% *}"
+ printf '%b│%b %-*s %b│%b %-*s %b│%b %-*s %b│%b\n' \
+   "$c" "$w" "$KZN_SSH_USER_W" "$1" "$c" \
+   "$w" "$KZN_SSH_EXP_W" "$exp" "$c" \
+   "$w" "$KZN_SSH_IP_W" "$3" "$c" "$r"
+}
+kaizen_ssh_table_footer(){
+ local c r a b d; c=$(kaizen_table_colour); r=$(kaizen_reset)
+ a=$(kaizen_repeat_line '─' $((KZN_SSH_USER_W+2)))
+ b=$(kaizen_repeat_line '─' $((KZN_SSH_EXP_W+2)))
+ d=$(kaizen_repeat_line '─' $((KZN_SSH_IP_W+2)))
+ printf '%b└%s┴%s┴%s┘%b\n' "$c" "$a" "$b" "$d" "$r"
+}
 
 kaizen_xray_table_header(){
- local c r bg='\e[0;47;30m'; c=$(kaizen_table_colour); r=$(kaizen_reset)
- printf '%b┌──────────────────┬──────────────┬────────────┬─────┐%b\n' "$c" "$r"
- printf '%b│%b%b %-16s %b%b│%b%b %-12s %b%b│%b%b %-10s %b%b│%b%b %-3s %b%b│%b\n' "$c" "$r" "$bg" Username "$r" "$c" "$r" "$bg" "Expire Date" "$r" "$c" "$r" "$bg" Quota "$r" "$c" "$r" "$bg" "IP" "$r" "$c" "$r"
- printf '%b├──────────────────┼──────────────┼────────────┼─────┤%b\n' "$c" "$r"
+ local proto="${1:-}" c r bg='\e[0;47;30m' a b q d
+ kaizen_xray_table_prepare "$proto"
+ c=$(kaizen_table_colour); r=$(kaizen_reset)
+ a=$(kaizen_repeat_line '─' $((KZN_XRAY_USER_W+2)))
+ b=$(kaizen_repeat_line '─' $((KZN_XRAY_EXP_W+2)))
+ q=$(kaizen_repeat_line '─' $((KZN_XRAY_QUOTA_W+2)))
+ d=$(kaizen_repeat_line '─' $((KZN_XRAY_IP_W+2)))
+ printf '%b┌%s┬%s┬%s┬%s┐%b\n' "$c" "$a" "$b" "$q" "$d" "$r"
+ printf '%b│%b%b %-*s %b%b│%b%b %-*s %b%b│%b%b %-*s %b%b│%b%b %-*s %b%b│%b\n' \
+   "$c" "$r" "$bg" "$KZN_XRAY_USER_W" Username "$r" "$c" \
+   "$r" "$bg" "$KZN_XRAY_EXP_W" "Expire Date" "$r" "$c" \
+   "$r" "$bg" "$KZN_XRAY_QUOTA_W" Quota "$r" "$c" \
+   "$r" "$bg" "$KZN_XRAY_IP_W" IP "$r" "$c" "$r"
+ printf '%b├%s┼%s┼%s┼%s┤%b\n' "$c" "$a" "$b" "$q" "$d" "$r"
 }
-kaizen_xray_table_row(){ local c w r; c=$(kaizen_table_colour); w=$(kaizen_text_colour); r=$(kaizen_reset); printf '%b│%b %-16.16s %b│%b %-12.12s %b│%b %-10.10s %b│%b %-3.3s %b│%b\n' "$c" "$w" "$1" "$c" "$w" "$2" "$c" "$w" "$3" "$c" "$w" "$4" "$c" "$r"; }
-kaizen_xray_table_footer(){ local c r; c=$(kaizen_table_colour); r=$(kaizen_reset); printf '%b└──────────────────┴──────────────┴────────────┴─────┘%b\n' "$c" "$r"; }
+kaizen_xray_table_row(){
+ local c w r exp; c=$(kaizen_table_colour); w=$(kaizen_text_colour); r=$(kaizen_reset); exp="${2%% *}"
+ printf '%b│%b %-*s %b│%b %-*s %b│%b %-*s %b│%b %-*s %b│%b\n' \
+   "$c" "$w" "$KZN_XRAY_USER_W" "$1" "$c" \
+   "$w" "$KZN_XRAY_EXP_W" "$exp" "$c" \
+   "$w" "$KZN_XRAY_QUOTA_W" "$3" "$c" \
+   "$w" "$KZN_XRAY_IP_W" "$4" "$c" "$r"
+}
+kaizen_xray_table_footer(){
+ local c r a b q d; c=$(kaizen_table_colour); r=$(kaizen_reset)
+ a=$(kaizen_repeat_line '─' $((KZN_XRAY_USER_W+2)))
+ b=$(kaizen_repeat_line '─' $((KZN_XRAY_EXP_W+2)))
+ q=$(kaizen_repeat_line '─' $((KZN_XRAY_QUOTA_W+2)))
+ d=$(kaizen_repeat_line '─' $((KZN_XRAY_IP_W+2)))
+ printf '%b└%s┴%s┴%s┴%s┘%b\n' "$c" "$a" "$b" "$q" "$d" "$r"
+}
 kaizen_total_users(){ local y w r; y=$(kaizen_yellow); w=$(kaizen_text_colour); r=$(kaizen_reset); printf '\n%bTotal User : %b%s%b\n' "$w" "$y" "$1" "$r"; }
 
 __KZN_KAIZEN_UI__
@@ -823,7 +925,7 @@ xray_live_state(){
 list(){
  local p=$1 row email expired ip_limit quota_bytes user quota_text ip_text
  clear; action_header "List $(proto_label "$p") Account"
- kaizen_xray_table_header
+ kaizen_xray_table_header "$p"
  rows=0
  while IFS='|' read -r email expired ip_limit quota_bytes; do
    [[ -n "$email" ]] || continue
@@ -876,7 +978,7 @@ simple_list(){
  clear; [[ -n "${ACTION_TITLE:-}" ]] && action_header "$ACTION_TITLE" || action_header "$(proto_label "$p") Account List"
  local where="protocol='$p'"
  [[ "$filter" == locked ]] && where="$where AND locked=1"
- kaizen_xray_table_header
+ kaizen_xray_table_header "$p"
  while IFS='|' read -r email expired ip_limit quota_bytes locked reason; do
    [[ -n "$email" ]] || continue
    rows=$((rows+1)); user="${email%@*}"
@@ -1147,10 +1249,26 @@ count_who() {
 
 clear
 kaizen_header " • Check SSH Login • "
+LOGIN_USER_W=16
+LOGIN_IP_W=2
+while read -r __u; do
+    kaizen_is_ssh_account_user "$__u" || continue
+    __n=${#__u}; (( __n > LOGIN_USER_W )) && LOGIN_USER_W=$__n
+    __lim=$(get_ip_limit "$__u")
+    [[ "$__lim" == "N/A" ]] && __lim='UL'
+    __n=${#__lim}; (( __n > LOGIN_IP_W )) && LOGIN_IP_W=$__n
+done < <(printf '%s\n' "${USERS[@]}")
+
 C=$(kaizen_table_colour); W=$(kaizen_text_colour); Y=$(kaizen_yellow); R=$(kaizen_reset); BG='\e[0;47;30m'
-printf '%b┌──────────────────┬────────────┬─────┐%b\n' "$C" "$R"
-printf '%b│%b%b %-16s %b%b│%b%b %-10s %b%b│%b%b %-10s %b%b│%b\n' "$C" "$R" "$BG" "Username" "$R" "$C" "$R" "$BG" "Login" "$R" "$C" "$R" "$BG" "IP" "$R" "$C" "$R"
-printf '%b├──────────────────┼────────────┼─────┤%b\n' "$C" "$R"
+__a=$(kaizen_repeat_line '─' $((LOGIN_USER_W+2)))
+__l=$(kaizen_repeat_line '─' 12)
+__i=$(kaizen_repeat_line '─' $((LOGIN_IP_W+2)))
+printf '%b┌%s┬%s┬%s┐%b\n' "$C" "$__a" "$__l" "$__i" "$R"
+printf '%b│%b%b %-*s %b%b│%b%b %-10s %b%b│%b%b %-*s %b%b│%b\n' \
+  "$C" "$R" "$BG" "$LOGIN_USER_W" "Username" "$R" "$C" \
+  "$R" "$BG" "Login" "$R" "$C" \
+  "$R" "$BG" "$LOGIN_IP_W" "IP" "$R" "$C" "$R"
+printf '%b├%s┼%s┼%s┤%b\n' "$C" "$__a" "$__l" "$__i" "$R"
 
 aktif=0
 telegram_text="*SSH User Login Report*\nDomain: \`$domain\`\nIP VPS: \`$ipvps\`\n----------------------------------"
@@ -1167,7 +1285,7 @@ for user in "${USERS[@]}"; do
     (( login == 0 && wh > 0 )) && login=$wh
     (( login > 0 )) || continue
 
-    limit=$(get_ip_limit "$user")
+    limit=$(get_ip_limit "$user"); [[ "$limit" == "N/A" ]] && limit="UL"
 
     printf '%b│%b %-32.32s %b│%b %-10s %b│%b %-10s %b│%b\n' "$C" "$W" "$user" "$C" "$Y" "$login" "$C" "$W" "$limit" "$C" "$R"
 
@@ -1178,7 +1296,7 @@ done
 if (( aktif == 0 )); then
     printf '%b│%b %-40s %b│%b\n' "$C" "$W" "No SSH users are currently online." "$C" "$R"
 fi
-printf '%b└──────────────────┴────────────┴─────┘%b\n' "$C" "$R"
+printf '%b└──────────────────┴────────────┴────┘%b\n' "$C" "$R"
 printf '%b%s User Online%b\n' "$Y" "$aktif" "$R"
 
 if [[ -f "$FLAG" && $aktif -gt 0 && -n "$telegram_bot_token" && -n "$telegram_chatid" ]]; then
@@ -1199,4 +1317,6 @@ mkdir -p /etc/kaizensc
 echo
 echo "Patch installed successfully."
 echo "Backup: $BACKUP"
-echo "IP table column width is now 3."
+echo "Default table widths: Username=16, Expire Date=11, Quota=7, IP=2."
+echo "Columns now auto-expand when account values are longer."
+echo "All previous Never / UL / date-only / brightness fixes are included."
