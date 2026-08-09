@@ -1,0 +1,2284 @@
+#!/usr/bin/env bash
+set -euo pipefail
+RERE=/usr/local/rere
+STAMP="$(date +%Y%m%d-%H%M%S)"
+BACKUP="/root/kaizensc-multi-fix-backup-${STAMP}"
+
+[[ ${EUID:-$(id -u)} -eq 0 ]] || { echo "Please run as root."; exit 1; }
+[[ -d "$RERE" ]] || { echo "KaizenSC not found: $RERE"; exit 1; }
+mkdir -p "$BACKUP/rere"
+
+
+[[ -f "$RERE/kaizen-ui" ]] && cp -a "$RERE/kaizen-ui" "$BACKUP/rere/kaizen-ui" || true
+cat > "$RERE/kaizen-ui" <<'__KZN_KAIZEN_UI__'
+#!/usr/bin/env bash
+# Shared KaizenSC submenu/action header.
+KUI_CYAN='\e[0;36m'
+KUI_WHITE='\e[0;97m'
+KUI_PLAIN='\e[0m'
+KUI_BG='\e[0;47;30m'
+kaizen_repeat(){
+  local ch="$1" n="$2" out='' i
+  for ((i=0;i<n;i++)); do out+="$ch"; done
+  printf '%s' "$out"
+}
+kaizen_header(){
+  local title="$1" width=49 len left right line
+  len=${#title}
+  (( len > width )) && width=$len
+  left=$(( (width-len)/2 )); right=$(( width-len-left ))
+  line=$(kaizen_repeat '─' "$width")
+  printf '%b┌%s┐%b\n' "$KUI_CYAN" "$line" "$KUI_PLAIN"
+  printf '%b│%b%b%*s%s%*s%b%b│%b\n' "$KUI_CYAN" "$KUI_PLAIN" "$KUI_BG" "$left" '' "$title" "$right" '' "$KUI_PLAIN" "$KUI_CYAN" "$KUI_PLAIN"
+  printf '%b└%s┘%b\n\n' "$KUI_CYAN" "$line" "$KUI_PLAIN"
+  printf '%b' "$KUI_WHITE"
+}
+
+kaizen_result_header(){
+  clear
+  kaizen_header " • $1 • "
+}
+
+# Compact account tables + runtime Adjust Text Brightness support.
+kaizen_text_mode(){ local f=/etc/kaizensc/text-brightness.conf; [[ -r "$f" ]] && cat "$f" 2>/dev/null || printf 'normal'; }
+kaizen_sgr(){ local c="$1" m; m=$(kaizen_text_mode); [[ "$m" == bold ]] && printf '\e[1;%sm' "$c" || printf '\e[0;%sm' "$c"; }
+kaizen_table_colour(){ kaizen_sgr 36; }; kaizen_text_colour(){ kaizen_sgr 97; }
+kaizen_green(){ kaizen_sgr 32; }; kaizen_red(){ kaizen_sgr 31; }; kaizen_yellow(){ kaizen_sgr 33; }; kaizen_reset(){ printf '\e[0m'; }
+kaizen_is_ssh_account_user(){
+ local u="$1" e uid
+ [[ -n "$u" && "$u" != syslog && "$u" != nobody ]] || return 1
+ e=$(getent passwd "$u" 2>/dev/null || true); [[ -n "$e" ]] || return 1
+ uid=$(printf '%s' "$e"|awk -F: '{print $3}'); [[ "$uid" =~ ^[0-9]+$ ]] || return 1
+ (( uid >= 1000 && uid != 65534 ))
+}
+kaizen_repeat_line(){ local ch="$1" n="$2" out='' i; for ((i=0;i<n;i++)); do out+="$ch"; done; printf '%s' "$out"; }
+
+# Minimum widths requested by KaizenSC. Columns automatically grow when data
+# is longer, so values are never truncated just to fit the default box.
+KZN_SSH_USER_W=16
+KZN_SSH_EXP_W=11
+KZN_SSH_IP_W=2
+KZN_XRAY_USER_W=16
+KZN_XRAY_EXP_W=11
+KZN_XRAY_QUOTA_W=7
+KZN_XRAY_IP_W=2
+
+kaizen_fmt_bytes_table(){
+ local b="${1:-0}"
+ [[ "$b" =~ ^[0-9]+$ ]] || b=0
+ awk -v b="$b" 'BEGIN {
+   if (b >= 1073741824) {v=b/1073741824; u="GB"}
+   else if (b >= 1048576) {v=b/1048576; u="MB"}
+   else if (b >= 1024) {v=b/1024; u="KB"}
+   else {v=b; u="B"}
+   if (v == int(v)) printf "%.0f %s", v, u;
+   else if (v < 10) printf "%.2f %s", v, u;
+   else printf "%.1f %s", v, u;
+ }'
+}
+
+kaizen_ssh_table_prepare(){
+ KZN_SSH_USER_W=16; KZN_SSH_EXP_W=11; KZN_SSH_IP_W=2
+ local db=/etc/kaizensc/database/ssh/database.json u exp lim iptxt n
+ [[ -s "$db" ]] || return 0
+ while IFS=$'\t' read -r u exp lim; do
+   kaizen_is_ssh_account_user "$u" || continue
+   exp="${exp%% *}"
+   [[ "$lim" =~ ^[0-9]+$ ]] || lim=0
+   (( lim > 0 )) && iptxt="$lim" || iptxt='UL'
+   n=${#u}; (( n > KZN_SSH_USER_W )) && KZN_SSH_USER_W=$n
+   n=${#exp}; (( n > KZN_SSH_EXP_W )) && KZN_SSH_EXP_W=$n
+   n=${#iptxt}; (( n > KZN_SSH_IP_W )) && KZN_SSH_IP_W=$n
+ done < <(jq -r '.[] | [.Username, (.Expired // "Lifetime"), (.LimitIP // 0)] | @tsv' "$db" 2>/dev/null)
+}
+
+kaizen_xray_table_prepare(){
+ local proto="${1:-}" db=/etc/kaizensc/database/xray/accounts.db email u exp lim quota iptxt qtxt n
+ KZN_XRAY_USER_W=16; KZN_XRAY_EXP_W=11; KZN_XRAY_QUOTA_W=7; KZN_XRAY_IP_W=2
+ [[ -n "$proto" && -s "$db" ]] || return 0
+ while IFS='|' read -r email exp lim quota; do
+   [[ -n "$email" ]] || continue
+   u="${email%@*}"; exp="${exp%% *}"
+   [[ "$lim" =~ ^[0-9]+$ ]] || lim=0
+   [[ "$quota" =~ ^[0-9]+$ ]] || quota=0
+   (( lim > 0 )) && iptxt="$lim" || iptxt='UL'
+   (( quota > 0 )) && qtxt="$(kaizen_fmt_bytes_table "$quota")" || qtxt='UL'
+   n=${#u}; (( n > KZN_XRAY_USER_W )) && KZN_XRAY_USER_W=$n
+   n=${#exp}; (( n > KZN_XRAY_EXP_W )) && KZN_XRAY_EXP_W=$n
+   n=${#qtxt}; (( n > KZN_XRAY_QUOTA_W )) && KZN_XRAY_QUOTA_W=$n
+   n=${#iptxt}; (( n > KZN_XRAY_IP_W )) && KZN_XRAY_IP_W=$n
+ done < <(sqlite3 -separator '|' "$db" "SELECT email,expired,ip_limit,quota_bytes FROM accounts WHERE protocol='$proto' ORDER BY email;" 2>/dev/null)
+}
+
+kaizen_ssh_table_header(){
+ kaizen_ssh_table_prepare
+ local c r bg='\e[0;47;30m' a b d
+ c=$(kaizen_table_colour); r=$(kaizen_reset)
+ a=$(kaizen_repeat_line '─' $((KZN_SSH_USER_W+2)))
+ b=$(kaizen_repeat_line '─' $((KZN_SSH_EXP_W+2)))
+ d=$(kaizen_repeat_line '─' $((KZN_SSH_IP_W+2)))
+ printf '%b┌%s┬%s┬%s┐%b\n' "$c" "$a" "$b" "$d" "$r"
+ printf '%b│%b%b %-*s %b%b│%b%b %-*s %b%b│%b%b %-*s %b%b│%b\n' \
+   "$c" "$r" "$bg" "$KZN_SSH_USER_W" Username "$r" "$c" \
+   "$r" "$bg" "$KZN_SSH_EXP_W" "Expire Date" "$r" "$c" \
+   "$r" "$bg" "$KZN_SSH_IP_W" "IP" "$r" "$c" "$r"
+ printf '%b├%s┼%s┼%s┤%b\n' "$c" "$a" "$b" "$d" "$r"
+}
+kaizen_ssh_table_row(){
+ local c w r exp; c=$(kaizen_table_colour); w=$(kaizen_text_colour); r=$(kaizen_reset); exp="${2%% *}"
+ printf '%b│%b %-*s %b│%b %-*s %b│%b %-*s %b│%b\n' \
+   "$c" "$w" "$KZN_SSH_USER_W" "$1" "$c" \
+   "$w" "$KZN_SSH_EXP_W" "$exp" "$c" \
+   "$w" "$KZN_SSH_IP_W" "$3" "$c" "$r"
+}
+kaizen_ssh_table_total_row(){
+  local total="$1" c w y r inner
+  c=$(kaizen_table_colour); w=$(kaizen_text_colour); y=$(kaizen_yellow); r=$(kaizen_reset)
+  inner=$((KZN_SSH_USER_W + KZN_SSH_EXP_W + KZN_SSH_IP_W + 8))
+  printf '%b├%s┴%s┴%s┤%b\n' "$c" \
+    "$(kaizen_repeat_line '─' $((KZN_SSH_USER_W+2)))" \
+    "$(kaizen_repeat_line '─' $((KZN_SSH_EXP_W+2)))" \
+    "$(kaizen_repeat_line '─' $((KZN_SSH_IP_W+2)))" "$r"
+  printf '%b│%b Total User : %b%-*s%b│%b\n' "$c" "$w" "$y" "$((inner-14))" "$total" "$c" "$r"
+  printf '%b└%s┘%b\n' "$c" "$(kaizen_repeat_line '─' "$inner")" "$r"
+}
+kaizen_ssh_table_footer(){
+ local c r a b d; c=$(kaizen_table_colour); r=$(kaizen_reset)
+ a=$(kaizen_repeat_line '─' $((KZN_SSH_USER_W+2)))
+ b=$(kaizen_repeat_line '─' $((KZN_SSH_EXP_W+2)))
+ d=$(kaizen_repeat_line '─' $((KZN_SSH_IP_W+2)))
+ printf '%b└%s┴%s┴%s┘%b\n' "$c" "$a" "$b" "$d" "$r"
+}
+
+kaizen_xray_table_header(){
+ local proto="${1:-}" c r bg='\e[0;47;30m' a b q d
+ kaizen_xray_table_prepare "$proto"
+ c=$(kaizen_table_colour); r=$(kaizen_reset)
+ a=$(kaizen_repeat_line '─' $((KZN_XRAY_USER_W+2)))
+ b=$(kaizen_repeat_line '─' $((KZN_XRAY_EXP_W+2)))
+ q=$(kaizen_repeat_line '─' $((KZN_XRAY_QUOTA_W+2)))
+ d=$(kaizen_repeat_line '─' $((KZN_XRAY_IP_W+2)))
+ printf '%b┌%s┬%s┬%s┬%s┐%b\n' "$c" "$a" "$b" "$q" "$d" "$r"
+ printf '%b│%b%b %-*s %b%b│%b%b %-*s %b%b│%b%b %-*s %b%b│%b%b %-*s %b%b│%b\n' \
+   "$c" "$r" "$bg" "$KZN_XRAY_USER_W" Username "$r" "$c" \
+   "$r" "$bg" "$KZN_XRAY_EXP_W" "Expire Date" "$r" "$c" \
+   "$r" "$bg" "$KZN_XRAY_QUOTA_W" Quota "$r" "$c" \
+   "$r" "$bg" "$KZN_XRAY_IP_W" IP "$r" "$c" "$r"
+ printf '%b├%s┼%s┼%s┼%s┤%b\n' "$c" "$a" "$b" "$q" "$d" "$r"
+}
+kaizen_xray_table_row(){
+ local c w r exp
+ c=$(kaizen_table_colour); w=$(kaizen_text_colour); r=$(kaizen_reset)
+ exp="${2%% *}"
+ printf '%b│%b %-*s %b│%b %-*s %b│%b %-*s %b│%b %-*s %b│%b\n' \
+   "$c" "$w" "$KZN_XRAY_USER_W" "$1" "$c" \
+   "$w" "$KZN_XRAY_EXP_W" "$exp" "$c" \
+   "$w" "$KZN_XRAY_QUOTA_W" "$3" "$c" \
+   "$w" "$KZN_XRAY_IP_W" "$4" "$c" "$r"
+}
+
+kaizen_xray_table_total_row(){
+  local total="$1" c w y r inner
+  c=$(kaizen_table_colour); w=$(kaizen_text_colour); y=$(kaizen_yellow); r=$(kaizen_reset)
+  inner=$((KZN_XRAY_USER_W + KZN_XRAY_EXP_W + KZN_XRAY_QUOTA_W + KZN_XRAY_IP_W + 11))
+  printf '%b├%s┴%s┴%s┴%s┤%b\n' "$c" \
+    "$(kaizen_repeat_line '─' $((KZN_XRAY_USER_W+2)))" \
+    "$(kaizen_repeat_line '─' $((KZN_XRAY_EXP_W+2)))" \
+    "$(kaizen_repeat_line '─' $((KZN_XRAY_QUOTA_W+2)))" \
+    "$(kaizen_repeat_line '─' $((KZN_XRAY_IP_W+2)))" "$r"
+  printf '%b│%b Total User : %b%-*s%b│%b\n' "$c" "$w" "$y" "$((inner-14))" "$total" "$c" "$r"
+  printf '%b└%s┘%b\n' "$c" "$(kaizen_repeat_line '─' "$inner")" "$r"
+}
+kaizen_xray_table_footer(){
+ local c r a b q d; c=$(kaizen_table_colour); r=$(kaizen_reset)
+ a=$(kaizen_repeat_line '─' $((KZN_XRAY_USER_W+2)))
+ b=$(kaizen_repeat_line '─' $((KZN_XRAY_EXP_W+2)))
+ q=$(kaizen_repeat_line '─' $((KZN_XRAY_QUOTA_W+2)))
+ d=$(kaizen_repeat_line '─' $((KZN_XRAY_IP_W+2)))
+ printf '%b└%s┴%s┴%s┴%s┘%b\n' "$c" "$a" "$b" "$q" "$d" "$r"
+}
+kaizen_total_users(){ local y w r; y=$(kaizen_yellow); w=$(kaizen_text_colour); r=$(kaizen_reset); printf '\n%bTotal User : %b%s%b\n' "$w" "$y" "$1" "$r"; }
+
+KZN_UNLOCK_USER_W=16
+KZN_UNLOCK_EXP_W=11
+KZN_UNLOCK_REASON_W=10
+kaizen_unlock_table_header(){
+ local c r bg='\e[0;47;30m' a b d
+ c=$(kaizen_table_colour); r=$(kaizen_reset)
+ a=$(kaizen_repeat_line '─' $((KZN_UNLOCK_USER_W+2))); b=$(kaizen_repeat_line '─' $((KZN_UNLOCK_EXP_W+2))); d=$(kaizen_repeat_line '─' $((KZN_UNLOCK_REASON_W+2)))
+ printf '%b┌%s┬%s┬%s┐%b\n' "$c" "$a" "$b" "$d" "$r"
+ printf '%b│%b%b %-*s %b%b│%b%b %-*s %b%b│%b%b %-*s %b%b│%b\n' "$c" "$r" "$bg" "$KZN_UNLOCK_USER_W" Username "$r" "$c" "$r" "$bg" "$KZN_UNLOCK_EXP_W" "Expire Date" "$r" "$c" "$r" "$bg" "$KZN_UNLOCK_REASON_W" Reason "$r" "$c" "$r"
+ printf '%b├%s┼%s┼%s┤%b\n' "$c" "$a" "$b" "$d" "$r"
+}
+kaizen_unlock_table_row(){ local c w r; c=$(kaizen_table_colour); w=$(kaizen_text_colour); r=$(kaizen_reset); printf '%b│%b %-*s %b│%b %-*s %b│%b %-*s %b│%b\n' "$c" "$w" "$KZN_UNLOCK_USER_W" "$1" "$c" "$w" "$KZN_UNLOCK_EXP_W" "${2%% *}" "$c" "$w" "$KZN_UNLOCK_REASON_W" "${3:-Manual}" "$c" "$r"; }
+kaizen_unlock_table_footer(){ local c r a b d; c=$(kaizen_table_colour); r=$(kaizen_reset); a=$(kaizen_repeat_line '─' $((KZN_UNLOCK_USER_W+2))); b=$(kaizen_repeat_line '─' $((KZN_UNLOCK_EXP_W+2))); d=$(kaizen_repeat_line '─' $((KZN_UNLOCK_REASON_W+2))); printf '%b└%s┴%s┴%s┘%b\n' "$c" "$a" "$b" "$d" "$r"; }
+
+__KZN_KAIZEN_UI__
+chmod 0755 "$RERE/kaizen-ui"
+bash -n "$RERE/kaizen-ui"
+
+[[ -f "$RERE/lock-ssh" ]] && cp -a "$RERE/lock-ssh" "$BACKUP/rere/lock-ssh" || true
+cat > "$RERE/lock-ssh" <<'__KZN_LOCK_SSH__'
+#!/usr/bin/env bash
+source /usr/local/rere/kaizen-ui 2>/dev/null || true
+set -u
+DB=/etc/kaizensc/database/ssh/database.json
+RED='\e[0;31m'; GREEN='\e[0;32m'; NC='\e[0m'
+[[ -s "$DB" ]] || { echo 'No SSH account found.'; exit 0; }
+# normalize Locked field
+jq 'map((if has("Locked") then . else . + {Locked:false} end) | (if has("LockReason") then . else . + {LockReason:""} end))' "$DB" > "$DB.tmp" && mv "$DB.tmp" "$DB"
+clear
+kaizen_header " • Lock SSH Account • "
+kaizen_ssh_table_header
+jq -r '.[] | select((.Locked // false)==false) | [.Username,(.Expired//"Lifetime"),(.LimitIP//0)] | @tsv' "$DB" | while IFS=$'\t' read -r u e l; do
+ kaizen_is_ssh_account_user "$u" || continue
+ [[ "$l" =~ ^[0-9]+$ ]] || l=0
+ (( l > 0 )) && ltxt="$l" || ltxt='UL'
+ kaizen_ssh_table_row "$u" "$e" "$ltxt"
+done
+kaizen_ssh_table_footer
+count=0
+while read -r u; do kaizen_is_ssh_account_user "$u" && count=$((count+1)); done < <(jq -r '.[]|select((.Locked//false)==false)|.Username' "$DB")
+((count>0)) || { echo 'No unlocked SSH account.'; exit 0; }
+read -rp 'Input Username: ' user
+kaizen_is_ssh_account_user "$user" || { echo '[ERROR] SSH account not found.'; exit 1; }
+exists=$(jq -r --arg u "$user" '.[]|select(.Username==$u and ((.Locked//false)==false))|.Username' "$DB" | head -1)
+[[ -n "$exists" ]] || { echo -e "${RED}Account not found or already locked.${NC}"; exit 1; }
+read -rp "Reason [Manual]: " reason
+reason=${reason:-Manual}
+read -rp "Lock SSH account '$user'? (y/n): " yn
+[[ "$yn" =~ ^[Yy]$ ]] || { echo 'Cancelled.'; exit 0; }
+passwd -l "$user" >/dev/null 2>&1 || usermod -L "$user" >/dev/null 2>&1 || true
+jq --arg u "$user" --arg r "$reason" 'map(if .Username==$u then .Locked=true | .LockReason=$r else . end)' "$DB" > "$DB.tmp" && mv "$DB.tmp" "$DB"
+mkdir -p /etc/kaizensc/recovery/ssh
+printf '%s\tLOCK\t%s\t%s\n' "$user" "$reason" "$(date '+%F %T')" >> /etc/kaizensc/recovery/ssh/recovery.tsv
+kaizen_result_header "SSH ACCOUNT LOCKED"
+echo "Account : $user"
+echo "Reason  : $reason"
+echo "Status  : LOCKED"
+
+__KZN_LOCK_SSH__
+chmod 0755 "$RERE/lock-ssh"
+bash -n "$RERE/lock-ssh"
+
+[[ -f "$RERE/unlock-ssh" ]] && cp -a "$RERE/unlock-ssh" "$BACKUP/rere/unlock-ssh" || true
+cat > "$RERE/unlock-ssh" <<'__KZN_UNLOCK_SSH__'
+#!/usr/bin/env bash
+source /usr/local/rere/kaizen-ui 2>/dev/null || true
+set -u
+DB=/etc/kaizensc/database/ssh/database.json
+RED='\e[0;31m'; GREEN='\e[0;32m'; NC='\e[0m'
+[[ -s "$DB" ]] || { echo 'No locked SSH account.'; exit 0; }
+jq 'map((if has("Locked") then . else . + {Locked:false} end) | (if has("LockReason") then . else . + {LockReason:""} end))' "$DB" > "$DB.tmp" && mv "$DB.tmp" "$DB"
+count=0
+while read -r u; do kaizen_is_ssh_account_user "$u" && count=$((count+1)); done < <(jq -r '.[]|select((.Locked//false)==true)|.Username' "$DB")
+((count>0)) || { clear; echo 'No locked SSH account.'; exit 0; }
+clear
+kaizen_header " • Unlock SSH Account • "
+KZN_UNLOCK_USER_W=16; KZN_UNLOCK_EXP_W=11; KZN_UNLOCK_REASON_W=10
+while IFS=$'\t' read -r u e reason; do
+ kaizen_is_ssh_account_user "$u" || continue; e="${e%% *}"; reason=${reason:-Manual}
+ ((${#u}>KZN_UNLOCK_USER_W)) && KZN_UNLOCK_USER_W=${#u}; ((${#e}>KZN_UNLOCK_EXP_W)) && KZN_UNLOCK_EXP_W=${#e}; ((${#reason}>KZN_UNLOCK_REASON_W)) && KZN_UNLOCK_REASON_W=${#reason}
+done < <(jq -r '.[] | select((.Locked//false)==true) | [.Username,(.Expired//"Lifetime"),(.LockReason//"Manual")] | @tsv' "$DB")
+kaizen_unlock_table_header
+while IFS=$'\t' read -r u e reason; do kaizen_is_ssh_account_user "$u" || continue; kaizen_unlock_table_row "$u" "$e" "${reason:-Manual}"; done < <(jq -r '.[] | select((.Locked//false)==true) | [.Username,(.Expired//"Lifetime"),(.LockReason//"Manual")] | @tsv' "$DB")
+kaizen_unlock_table_footer
+read -rp 'Input Username: ' user
+kaizen_is_ssh_account_user "$user" || { echo '[ERROR] SSH account not found.'; exit 1; }
+exists=$(jq -r --arg u "$user" '.[]|select(.Username==$u and ((.Locked//false)==true))|.Username' "$DB" | head -1)
+[[ -n "$exists" ]] || { echo -e "${RED}Locked account not found.${NC}"; exit 1; }
+mapfile -t recent_ips < <(journalctl -u ssh -u sshd --no-pager 2>/dev/null | grep -E "Accepted .* for ${user} " | grep -oE 'from ([0-9a-fA-F:.]+)' | awk '{print $2}' | sort -u)
+usermod -U "$user" >/dev/null 2>&1 || true
+passwd -u "$user" >/dev/null 2>&1 || true
+command -v faillock >/dev/null 2>&1 && faillock --user "$user" --reset >/dev/null 2>&1 || true
+command -v pam_tally2 >/dev/null 2>&1 && pam_tally2 --user "$user" --reset >/dev/null 2>&1 || true
+if command -v fail2ban-client >/dev/null 2>&1; then
+  jails=$(fail2ban-client status 2>/dev/null | sed -n 's/.*Jail list:[[:space:]]*//p')
+  IFS=',' read -ra jail_arr <<< "$jails"
+  for jail in "${jail_arr[@]}"; do
+    jail=$(echo "$jail" | xargs); [[ -n "$jail" ]] || continue
+    for ip in "${recent_ips[@]}"; do fail2ban-client set "$jail" unbanip "$ip" >/dev/null 2>&1 || true; done
+  done
+fi
+jq --arg u "$user" 'map(if .Username==$u then .Locked=false | .LockReason="" else . end)' "$DB" > "$DB.tmp" && mv "$DB.tmp" "$DB"
+mkdir -p /etc/kaizensc/recovery/ssh
+printf '%s\tUNLOCK\t%s\n' "$user" "$(date '+%F %T')" >> /etc/kaizensc/recovery/ssh/recovery.tsv
+kaizen_result_header "SSH ACCOUNT UNLOCKED"
+echo "Account : $user"
+echo "Status  : UNLOCKED"
+echo "Login/IP History : CLEARED"
+
+__KZN_UNLOCK_SSH__
+chmod 0755 "$RERE/unlock-ssh"
+bash -n "$RERE/unlock-ssh"
+
+[[ -f "$RERE/delete-ssh" ]] && cp -a "$RERE/delete-ssh" "$BACKUP/rere/delete-ssh" || true
+cat > "$RERE/delete-ssh" <<'__KZN_DELETE_SSH__'
+#!/usr/bin/env bash
+source /usr/local/rere/kaizen-ui 2>/dev/null || true
+set -u
+DB=/etc/kaizensc/database/ssh/database.json
+[[ -s "$DB" ]] || { echo 'No SSH account found.'; exit 0; }
+clear
+kaizen_header " • Delete SSH Account • "
+kaizen_ssh_table_header
+jq -r '.[]|[.Username,(.Expired//"Lifetime"),(.LimitIP//0)] | @tsv' "$DB" | while IFS=$'\t' read -r u e l; do
+ kaizen_is_ssh_account_user "$u" || continue
+ [[ "$l" =~ ^[0-9]+$ ]] || l=0
+ (( l > 0 )) && ltxt="$l" || ltxt='UL'
+ kaizen_ssh_table_row "$u" "$e" "$ltxt"
+done
+kaizen_ssh_table_footer
+read -rp 'Input Username: ' user
+kaizen_is_ssh_account_user "$user" || { echo '[ERROR] SSH account not found.'; exit 1; }
+jq -e --arg u "$user" '.[]|select(.Username==$u)' "$DB" >/dev/null || { echo '[ERROR] Account not found.'; exit 1; }
+read -rp "Delete SSH account '$user'? (y/n): " yn
+[[ "$yn" =~ ^[Yy]$ ]] || { echo 'Cancelled.'; exit 0; }
+userdel -f -r "$user" >/dev/null 2>&1 || true
+rm -f /etc/kaizensc/limit/ssh/{ip,cache,quota,usage}/"$user" 2>/dev/null || true
+jq --arg u "$user" 'map(select(.Username!=$u))' "$DB" > "$DB.tmp" && mv "$DB.tmp" "$DB"
+kaizen_result_header "SSH ACCOUNT DELETED"
+echo "Account : $user"
+echo "Status  : DELETED"
+
+__KZN_DELETE_SSH__
+chmod 0755 "$RERE/delete-ssh"
+bash -n "$RERE/delete-ssh"
+
+[[ -f "$RERE/xray-account" ]] && cp -a "$RERE/xray-account" "$BACKUP/rere/xray-account" || true
+cat > "$RERE/xray-account" <<'__KZN_XRAY_ACCOUNT__'
+#!/usr/bin/env bash
+set -u
+
+# Shared UI helpers
+if [[ -r /usr/local/rere/kaizen-ui ]]; then
+  source /usr/local/rere/kaizen-ui
+else
+  echo "[ERROR] KaizenSC UI helper not found: /usr/local/rere/kaizen-ui" >&2
+  exit 1
+fi
+
+for __fn in kaizen_header kaizen_xray_table_header kaizen_xray_table_row kaizen_xray_table_footer kaizen_xray_table_total_row; do
+  declare -F "$__fn" >/dev/null 2>&1 || {
+    echo "[ERROR] KaizenSC UI helper is incomplete: $__fn" >&2
+    exit 1
+  }
+done
+unset __fn
+proto_label(){ case "$1" in vless) echo Vless;; vmess) echo Vmess;; trojan) echo Trojan;; *) echo "$1";; esac; }
+action_header(){ local t="$1"; command -v kaizen_header >/dev/null 2>&1 && kaizen_header " • $t • " || { echo "=== $t ==="; echo; }; }
+result_header(){
+  local t="$1"
+  clear
+  action_header "$t"
+}
+
+ACTION_TITLE=''
+UI_RED='\e[0;31m'
+UI_CYAN='\e[0;36m'
+UI_WHITE='\e[0;97m'
+UI_PLAIN='\e[0m'
+xray_rainbow(){
+  local i
+  printf '  '
+  for i in {52..57} {57..52}; do printf "\e[38;5;${i}m────\e[0m"; done
+  echo
+}
+BASE=/etc/kaizensc
+DB="$BASE/database/xray/accounts.db"
+REC="$BASE/recovery/xray/recovery.tsv"
+XRAY_BIN=/usr/local/xray-new/xray
+mkdir -p "$(dirname "$DB")" "$(dirname "$REC")"
+touch "$REC"
+sqlite3 "$DB" 'CREATE TABLE IF NOT EXISTS accounts(protocol TEXT NOT NULL,email TEXT NOT NULL,credential TEXT NOT NULL,expired TEXT NOT NULL,ip_limit INTEGER NOT NULL DEFAULT 0,quota_bytes INTEGER NOT NULL DEFAULT 0,created_at TEXT NOT NULL,PRIMARY KEY(protocol,email));'
+sqlite3 "$DB" "PRAGMA table_info(accounts);" | grep -q '|locked|' || sqlite3 "$DB" "ALTER TABLE accounts ADD COLUMN locked INTEGER NOT NULL DEFAULT 0;"
+sqlite3 "$DB" "PRAGMA table_info(accounts);" | grep -q '|lock_reason|' || sqlite3 "$DB" "ALTER TABLE accounts ADD COLUMN lock_reason TEXT NOT NULL DEFAULT '';"
+
+domain(){ cat /etc/xray/domain 2>/dev/null || hostname -f; }
+json(){ echo "/etc/kaizensc/xray/$1/inbounds.json"; }
+service(){ echo "xray-$1"; }
+api_port(){ case "$1" in vless) echo 10080;; vmess) echo 10081;; trojan) echo 10082;; esac; }
+valid_proto(){ [[ "$1" =~ ^(vless|vmess|trojan)$ ]]; }
+credential_key(){ [[ "$1" == trojan ]] && echo password || echo id; }
+restart_proto(){ systemctl restart "$(service "$1")"; }
+fmt_bytes(){
+ local b="${1:-0}"
+ [[ "$b" =~ ^[0-9]+$ ]] || b=0
+ awk -v b="$b" 'BEGIN {
+   if (b >= 1073741824) {v=b/1073741824; u="GB"}
+   else if (b >= 1048576) {v=b/1048576; u="MB"}
+   else if (b >= 1024) {v=b/1024; u="KB"}
+   else {v=b; u="B"}
+   if (v == int(v)) printf "%.0f %s", v, u;
+   else if (v < 10) printf "%.2f %s", v, u;
+   else printf "%.1f %s", v, u;
+ }'
+}
+expire_parse(){ local x="$1"; if [[ "$x" =~ ^[0-9]+$ ]]; then date -d "+$x days" '+%F %T'; elif [[ "$x" =~ ^[0-9]+[mhd]$ ]]; then local n=${x%?} u=${x: -1}; case $u in m) u=minutes;; h) u=hours;; d) u=days;; esac; date -d "+$n $u" '+%F %T'; else date -d "$x" '+%F %T' 2>/dev/null; fi; }
+text_to_uuid(){
+ local text="$1" h
+ h=$(printf '%s' "$text" | sha256sum | awk '{print $1}')
+ # RFC4122-shaped deterministic UUID from arbitrary text.
+ printf '%s-%s-4%s-8%s-%s\n' "${h:0:8}" "${h:8:4}" "${h:13:3}" "${h:17:3}" "${h:20:12}"
+}
+current_stat_total(){
+ local p="$1" email="$2" api
+ api="127.0.0.1:$(api_port "$p")"
+ "$XRAY_BIN" api statsquery --server="$api" 2>/dev/null | jq -r --arg e "$email" '[.stat[]? | select(.name == ("user>>>"+$e+">>>traffic>>>uplink") or .name == ("user>>>"+$e+">>>traffic>>>downlink")) | (.value // 0)] | add // 0' 2>/dev/null || echo 0
+}
+sync_usage_once(){
+  local p="$1" email="$2" total old usage delta
+  mkdir -p "$BASE/limit/xray/$p/usage" "$BASE/limit/xray/$p/cache"
+  total=$(current_stat_total "$p" "$email"); [[ "$total" =~ ^[0-9]+$ ]] || total=0
+  old=$(cat "$BASE/limit/xray/$p/cache/$email" 2>/dev/null || echo 0); [[ "$old" =~ ^[0-9]+$ ]] || old=0
+  usage=$(cat "$BASE/limit/xray/$p/usage/$email" 2>/dev/null || echo 0); [[ "$usage" =~ ^[0-9]+$ ]] || usage=0
+  if (( total >= old )); then delta=$((total-old)); else delta=$total; fi
+  usage=$((usage+delta))
+  echo "$usage" > "$BASE/limit/xray/$p/usage/$email"
+  echo "$total" > "$BASE/limit/xray/$p/cache/$email"
+  printf '%s\n' "$usage"
+}
+clear_account_login_state(){
+ local p="$1" email="$2" log="/var/log/xray/$p.log" tmp baseline
+ # Remove only this account's historic login rows; keep other users' logs intact.
+ if [[ -f "$log" ]]; then
+   tmp=$(mktemp "${log}.clear.XXXXXX")
+   grep -Fv -- "$email" "$log" > "$tmp" 2>/dev/null || true
+   cat "$tmp" > "$log"
+   rm -f "$tmp"
+ fi
+ mkdir -p "$BASE/limit/xray/$p/cache"
+ baseline=$(current_stat_total "$p" "$email"); [[ "$baseline" =~ ^[0-9]+$ ]] || baseline=0
+ echo "$baseline" > "$BASE/limit/xray/$p/cache/$email"
+}
+
+add_json(){ local p=$1 email=$2 cred=$3 key; key=$(credential_key "$p"); jq --arg p "$p" --arg e "$email" --arg c "$cred" --arg k "$key" '(.inbounds[] | select(.protocol==$p) | .settings.clients) += [if $k=="id" then {id:$c,email:$e,level:0} else {password:$c,email:$e,level:0} end]' "$(json "$p")" > "$(json "$p").tmp" && mv "$(json "$p").tmp" "$(json "$p")"; }
+delete_json(){ local p=$1 email=$2; jq --arg p "$p" --arg e "$email" '(.inbounds[] | select(.protocol==$p) | .settings.clients) |= map(select(.email!=$e))' "$(json "$p")" > "$(json "$p").tmp" && mv "$(json "$p").tmp" "$(json "$p")"; }
+update_credential_json(){ local p=$1 email=$2 cred=$3 key; key=$(credential_key "$p"); jq --arg p "$p" --arg e "$email" --arg c "$cred" --arg k "$key" '(.inbounds[] | select(.protocol==$p) | .settings.clients) |= map(if .email==$e then (if $k=="id" then .id=$c else .password=$c end) else . end)' "$(json "$p")" > "$(json "$p").tmp" && mv "$(json "$p").tmp" "$(json "$p")"; }
+
+links(){
+ local p="${1:-}" email="${2:-}" c="${3:-}" d="${4:-}" exp="${5:-}"
+ local tls='443' ntls='80' name user tcp_tls tcp_ntls row ip_limit quota_bytes ip_text quota_text
+ [[ -n "$p" && -n "$email" && -n "$c" && -n "$d" ]] || { echo '[ERROR] Incomplete account data.'; return 1; }
+ user=${email%@*}
+ name=$user
+ case "$p" in
+   vless) tcp_tls=2083; tcp_ntls=2082 ;;
+   vmess) tcp_tls=2087; tcp_ntls=2086 ;;
+   trojan) tcp_tls=2096; tcp_ntls=2095 ;;
+ esac
+ row=$(sqlite3 -separator '|' "$DB" "SELECT ip_limit,quota_bytes FROM accounts WHERE protocol='$p' AND email='$email' LIMIT 1;" 2>/dev/null || true)
+ IFS='|' read -r ip_limit quota_bytes <<< "$row"
+ [[ "${ip_limit:-}" =~ ^[0-9]+$ ]] || ip_limit=0
+ [[ "${quota_bytes:-}" =~ ^[0-9]+$ ]] || quota_bytes=0
+ (( ip_limit > 0 )) && ip_text="$ip_limit" || ip_text='Unlimited'
+ (( quota_bytes > 0 )) && quota_text="$(fmt_bytes "$quota_bytes")" || quota_text='Unlimited'
+ echo "Host/IP           : $d"
+ echo "Email             : ${email%@*}"
+ echo "UUID              : $c"
+ echo "Limit IP          : $ip_text"
+ echo "Limit Quota       : $quota_text"
+ echo "Port TLS          : 443, 8443, 8999, 9443, 9755, 400-777"
+ echo "Port none TLS     : 80-108, 8000, 8080-8180, 2084-2085, 2088-2094, 2097-2199"
+ echo "Port TCP TLS      : $tcp_tls"
+ echo "Port TCP none TLS : $tcp_ntls"
+ echo '══════════════════════════════════════════════════'
+ echo "Expired : ${exp%% *}"
+ echo '══════════════════════════════════════════════════'
+ echo
+ if [[ $p == vless ]]; then
+   echo "[WebSocket TLS]"; echo "vless://$c@$d:$tls?encryption=none&security=tls&sni=$d&type=ws&host=$d&path=/vlessws#$name"; echo
+   echo "[WebSocket Non-TLS]"; echo "vless://$c@$d:$ntls?encryption=none&security=none&type=ws&host=$d&path=/vlessws#$name"; echo
+   echo "[HTTPUpgrade TLS]"; echo "vless://$c@$d:$tls?encryption=none&security=tls&sni=$d&type=httpupgrade&host=$d&path=/hu-vless#$name"; echo
+   echo "[HTTPUpgrade Non-TLS]"; echo "vless://$c@$d:$ntls?encryption=none&security=none&type=httpupgrade&host=$d&path=/hu-vless#$name"; echo
+   echo "[XHTTP TLS]"; echo "vless://$c@$d:$tls?encryption=none&security=tls&sni=$d&type=xhttp&host=$d&path=/xhttpvl&mode=auto#$name"; echo
+   echo "[XHTTP Non-TLS]"; echo "vless://$c@$d:$ntls?encryption=none&security=none&type=xhttp&host=$d&path=/xhttpvl&mode=auto#$name"; echo
+   echo "[gRPC TLS]"; echo "vless://$c@$d:$tls?encryption=none&security=tls&sni=$d&type=grpc&serviceName=vless-grpc&mode=gun#$name"; echo
+   echo "[gRPC Non-TLS]"; echo "vless://$c@$d:$ntls?encryption=none&security=none&type=grpc&serviceName=vless-grpc&mode=gun#$name"; echo
+   echo "[TCP HTTP TLS]"; echo "vless://$c@$d:$tcp_tls?encryption=none&security=tls&sni=$d&type=tcp&headerType=http&path=/&host=$d#$name"; echo
+   echo "[TCP HTTP Non-TLS]"; echo "vless://$c@$d:$tcp_ntls?encryption=none&security=none&type=tcp&headerType=http&path=/&host=$d#$name"; echo
+ elif [[ $p == trojan ]]; then
+   echo "[WebSocket TLS]"; echo "trojan://$c@$d:$tls?security=tls&sni=$d&type=ws&host=$d&path=/trojan#$name"; echo
+   echo "[WebSocket Non-TLS]"; echo "trojan://$c@$d:$ntls?security=none&type=ws&host=$d&path=/trojan#$name"; echo
+   echo "[HTTPUpgrade TLS]"; echo "trojan://$c@$d:$tls?security=tls&sni=$d&type=httpupgrade&host=$d&path=/hu-trojan#$name"; echo
+   echo "[HTTPUpgrade Non-TLS]"; echo "trojan://$c@$d:$ntls?security=none&type=httpupgrade&host=$d&path=/hu-trojan#$name"; echo
+   echo "[XHTTP TLS]"; echo "trojan://$c@$d:$tls?security=tls&sni=$d&type=xhttp&host=$d&path=/xhttptr&mode=auto#$name"; echo
+   echo "[XHTTP Non-TLS]"; echo "trojan://$c@$d:$ntls?security=none&type=xhttp&host=$d&path=/xhttptr&mode=auto#$name"; echo
+   echo "[gRPC TLS]"; echo "trojan://$c@$d:$tls?security=tls&sni=$d&type=grpc&serviceName=trojan-grpc&mode=gun#$name"; echo
+   echo "[gRPC Non-TLS]"; echo "trojan://$c@$d:$ntls?security=none&type=grpc&serviceName=trojan-grpc&mode=gun#$name"; echo
+   echo "[TCP HTTP TLS]"; echo "trojan://$c@$d:$tcp_tls?security=tls&sni=$d&type=tcp&headerType=http&path=/&host=$d#$name"; echo
+   echo "[TCP HTTP Non-TLS]"; echo "trojan://$c@$d:$tcp_ntls?security=none&type=tcp&headerType=http&path=/&host=$d#$name"; echo
+ else
+   vm(){ local net=$1 path=$2 sec=$3 port=$4 type=${5:-none}; local raw; raw=$(printf '{"v":"2","ps":"%s","add":"%s","port":"%s","id":"%s","aid":"0","scy":"auto","net":"%s","type":"%s","host":"%s","path":"%s","tls":"%s","sni":"%s"}' "$user" "$d" "$port" "$c" "$net" "$type" "$d" "$path" "$sec" "$([[ $sec == tls ]] && echo "$d")" | base64 -w0); echo "vmess://$raw"; }
+   echo "[WebSocket TLS]"; vm ws /vmess tls "$tls"; echo
+   echo "[WebSocket Non-TLS]"; vm ws /vmess '' "$ntls"; echo
+   echo "[HTTPUpgrade TLS]"; vm httpupgrade /hu-vmess tls "$tls"; echo
+   echo "[HTTPUpgrade Non-TLS]"; vm httpupgrade /hu-vmess '' "$ntls"; echo
+   echo "[XHTTP TLS]"; vm xhttp /xhttpvm tls "$tls"; echo
+   echo "[XHTTP Non-TLS]"; vm xhttp /xhttpvm '' "$ntls"; echo
+   echo "[gRPC TLS]"; vm grpc vmess-grpc tls "$tls"; echo
+   echo "[gRPC Non-TLS]"; vm grpc vmess-grpc '' "$ntls"; echo
+   echo "[TCP HTTP TLS]"; vm tcp / tls "$tcp_tls" http; echo
+   echo "[TCP HTTP Non-TLS]"; vm tcp / '' "$tcp_ntls" http; echo
+ fi
+ echo '══════════════════════════════════════════════════'
+}
+
+print_expired_section(){
+ local exp="${1:-}" d label width=50 pad
+ d="${exp%% *}"
+ label="Expired : $d"
+ pad=$(( (width-${#label})/2 )); ((pad<0)) && pad=0
+ echo '══════════════════════════════════════════════════'
+ printf '%*s%s
+' "$pad" '' "$label"
+}
+
+create(){
+ local p=$1 mode=${2:-normal} email=${3:-} ip=${4:-} qgb=${5:-} expin=${6:-} supplied_cred=${7:-}
+ valid_proto "$p" || exit 2
+ if [[ $mode == trial ]]; then
+   clear; action_header "Create $(proto_label "$p") Trial Account"
+   echo -e "  ${UI_WHITE}Information on adding an account${UI_PLAIN}"
+   echo
+   echo -e "  ${UI_WHITE}Example of valid Expired input:${UI_PLAIN}"
+   echo
+   echo -e "  ${UI_WHITE}- 1m  (expired 1 minute)${UI_PLAIN}"
+   echo -e "  ${UI_WHITE}- 1h  (expired 1 hour)${UI_PLAIN}"
+   echo -e "  ${UI_WHITE}- 1d  (expired 1 day)${UI_PLAIN}"
+   echo -e "  ${UI_CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${UI_PLAIN}"
+   echo
+   while true; do
+     read -rp '  Expired (1m/1h/1d): ' expin
+     [[ "$expin" =~ ^[1-9][0-9]*[mhd]$ ]] && break
+     echo; echo -e "  ${UI_RED}Invalid expired format. Use for example: 1m, 1h or 1d.${UI_PLAIN}"; echo
+   done
+   email="trial$RANDOM@$(domain)"
+   ip=${ip:-2}; qgb=${qgb:-100}
+ elif [[ -z $email ]]; then
+   clear
+   if [[ "$mode" == custom ]]; then
+     action_header "Create $(proto_label "$p") Account [Custom UUID, IP, Quota]"
+     echo -e "  ${UI_WHITE}Information on adding an account${UI_PLAIN}"; echo
+     echo -e "  ${UI_CYAN}Format Limit IP login${UI_PLAIN}"
+     echo -e "  ${UI_WHITE}- 0 for unlimited login${UI_PLAIN}"
+     echo -e "  ${UI_WHITE}- 1 for 1 limit login${UI_PLAIN}"; echo
+     echo -e "  ${UI_CYAN}Format Limit Quota${UI_PLAIN}"
+     echo -e "  ${UI_WHITE}- 0 for unlimited Quota${UI_PLAIN}"
+     echo -e "  ${UI_WHITE}- 1 for 1 gb limit quota${UI_PLAIN}"; echo
+     echo -e "  ${UI_CYAN}Example of valid Expired input${UI_PLAIN}"
+     echo -e "  ${UI_WHITE}- 10                    (meaning 10 days from now)${UI_PLAIN}"
+     echo -e "  ${UI_WHITE}- 2025-12-01            (means the date with the current time)${UI_PLAIN}"
+     echo -e "  ${UI_WHITE}- 2025-12-01 15:30:00   (specific date and time)${UI_PLAIN}"; echo
+     echo -e "  ${UI_CYAN}Format UUID/Password${UI_PLAIN}"
+     echo -e "  ${UI_WHITE}- 1 text                                (auto custom uuid/password)${UI_PLAIN}"
+     echo -e "  ${UI_WHITE}- none / space                          (auto random uuid/password)${UI_PLAIN}"
+     echo -e "  ${UI_WHITE}- c7e6b05d-4ab2-49f1-ba76-0c77cec2629f (use this uuid/password)${UI_PLAIN}"
+   else
+     action_header "Create $(proto_label "$p") Account"
+     echo -e "  ${UI_WHITE}Information on adding an account${UI_PLAIN}"; echo
+     echo -e "  ${UI_CYAN}For this option:-${UI_PLAIN}"
+     echo -e "  ${UI_WHITE}-IP Limit : Unlimited${UI_PLAIN}"
+     echo -e "  ${UI_WHITE}-Quota GB : Unlimited${UI_PLAIN}"
+   fi
+   echo; xray_rainbow; echo
+   read -rp '  Email          : ' email
+ fi
+ [[ -n "$email" ]] || { echo '[ERROR] Email/username cannot be empty.'; return 1; }
+ [[ "$email" == *@* ]] || email="$email@$(domain)"
+ sqlite3 "$DB" "SELECT 1 FROM accounts WHERE protocol='$p' AND email='$email';" | grep -q 1 && { echo 'Account already exists.'; return 1; }
+ if [[ "$mode" == custom ]]; then
+   [[ -z $ip ]] && read -rp '  IP Limit       : ' ip
+   [[ -z $qgb ]] && read -rp '  Quota GB       : ' qgb
+ elif [[ "$mode" == normal ]]; then
+   ip=0; qgb=0
+ fi
+ [[ -z $expin ]] && read -rp '  Expired        : ' expin
+ local exp
+ if [[ "$expin" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]]; then exp=$(date -d "$expin $(date '+%T')" '+%F %T' 2>/dev/null); else exp=$(expire_parse "$expin"); fi
+ [[ -n "${exp:-}" ]] || { echo '[ERROR] Invalid expiry.'; return 1; }
+ local cred="$supplied_cred" input
+ if [[ -z "$cred" && "$mode" == custom ]]; then
+   read -rp '  UUID/Password  : ' input
+   if [[ "$p" == trojan ]]; then
+     cred="$input"
+   else
+     if [[ -z "$input" ]]; then cred=''
+     elif [[ "$input" =~ ^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-5][0-9a-fA-F]{3}-[89aAbB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$ ]]; then cred="$input"
+     else cred=$(text_to_uuid "$input"); fi
+   fi
+ fi
+ if [[ -z "$cred" ]]; then [[ $p == trojan ]] && cred=$(cat /proc/sys/kernel/random/uuid | tr -d '-') || cred=$(cat /proc/sys/kernel/random/uuid); fi
+ local qb=0; [[ ${qgb:-0} =~ ^[0-9]+$ ]] && (( qgb > 0 )) && qb=$((qgb*1024*1024*1024))
+ [[ ${ip:-0} =~ ^[0-9]+$ ]] || ip=0
+ sqlite3 "$DB" "INSERT INTO accounts(protocol,email,credential,expired,ip_limit,quota_bytes,created_at,locked,lock_reason) VALUES('$p','$email','$cred','$exp',$ip,$qb,'$(date '+%F %T')',0,'');"
+ add_json "$p" "$email" "$cred"
+ for sub in ip quota usage cache lock; do mkdir -p "$BASE/limit/xray/$p/$sub"; done
+ echo "$ip" > "$BASE/limit/xray/$p/ip/$email"; echo "$qb" > "$BASE/limit/xray/$p/quota/$email"; echo 0 > "$BASE/limit/xray/$p/usage/$email"; echo 0 > "$BASE/limit/xray/$p/cache/$email"
+ restart_proto "$p"
+ clear; action_header "$(proto_label "$p") Account Information"; links "$p" "$email" "$cred" "$(domain)" "$exp"
+}
+
+xray_recent_ips(){
+ local p="$1" email="$2" seconds="${3:-180}" log cutoff
+ log="/var/log/xray/$p.log"; [[ -f "$log" ]] || return 0
+ cutoff=$(date -d "$seconds seconds ago" '+%Y/%m/%d %H:%M:%S')
+ awk -v e="$email" -v cutoff="$cutoff" '
+   index($0,e) {
+     d=$1; t=$2; sub(/\..*/,"",t); ts=d " " t;
+     if (d !~ /^[0-9][0-9][0-9][0-9]\/[0-9][0-9]\/[0-9][0-9]$/ || ts < cutoff) next;
+     for(i=1;i<=NF;i++) if($i=="from" && (i+1)<=NF){a=$(i+1); sub(/^(tcp:|udp:)/,"",a); if(a~/^\[/){sub(/^\[/,"",a);sub(/\]:[0-9]+$/,"",a)}else{sub(/:[0-9]+$/,"",a)}; if(a!="127.0.0.1"&&a!="::1"&&a!="")print a; break}
+   }' "$log" 2>/dev/null | sort -u
+}
+xray_last_login(){
+ local p="$1" email="$2" log="/var/log/xray/$p.log" raw
+ [[ -f "$log" ]] || { echo 'Never'; return; }
+ raw=$(grep -F "$email" "$log" 2>/dev/null | tail -n1 | awk '{print $1" "$2}')
+ [[ -n "$raw" ]] || { echo 'Never'; return; }
+ raw=${raw%%.*}
+ date -d "${raw//\//-}" '+%F %T' 2>/dev/null || echo "$raw"
+}
+
+xray_live_state(){
+ local p="$1" email="$2" api a b ips
+ api="127.0.0.1:$(api_port "$p")"
+ stat_now(){ "$XRAY_BIN" api statsquery --server="$api" 2>/dev/null | jq -r --arg e "$email" '[.stat[]? | select(.name == ("user>>>"+$e+">>>traffic>>>uplink") or .name == ("user>>>"+$e+">>>traffic>>>downlink")) | (.value // 0)] | add // 0' 2>/dev/null || echo 0; }
+ a=$(stat_now); [[ "$a" =~ ^[0-9]+$ ]] || a=0
+ sleep 2
+ b=$(stat_now); [[ "$b" =~ ^[0-9]+$ ]] || b=0
+ if (( b > a )); then
+   ips=$(xray_recent_ips "$p" "$email" 300 | awk 'NF{n++} END{print n+0}')
+   (( ips < 1 )) && ips=1
+   printf 'ONLINE|%s\n' "$ips"
+ else
+   printf 'OFFLINE|0\n'
+ fi
+}
+
+list(){
+ local p=$1 row email expired ip_limit quota_bytes user quota_text ip_text
+ clear; action_header "List $(proto_label "$p") Account"
+ kaizen_xray_table_header "$p"
+ rows=0
+ while IFS='|' read -r email expired ip_limit quota_bytes; do
+   [[ -n "$email" ]] || continue
+   user="${email%@*}"
+   [[ "$ip_limit" =~ ^[0-9]+$ ]] || ip_limit=0
+   [[ "$quota_bytes" =~ ^[0-9]+$ ]] || quota_bytes=0
+   (( ip_limit > 0 )) && ip_text="$ip_limit" || ip_text='UL'
+   (( quota_bytes > 0 )) && quota_text="$(fmt_bytes "$quota_bytes")" || quota_text='UL'
+   kaizen_xray_table_row "$user" "${expired%% *}" "$quota_text" "$ip_text"
+   rows=$((rows + 1))
+ done < <(sqlite3 -separator '|' "$DB" "SELECT email,expired,ip_limit,quota_bytes FROM accounts WHERE protocol='$p' ORDER BY email;")
+ kaizen_xray_table_total_row "$rows"
+
+ echo
+ read -rp 'Enter username to view detailed information (blank = back): ' wanted
+ [[ -n "${wanted:-}" ]] || return 0
+ row=$(sqlite3 -separator '|' "$DB" "SELECT email,expired,ip_limit,quota_bytes FROM accounts WHERE protocol='$p' AND (email='$wanted' OR email LIKE '$wanted@%') LIMIT 1;")
+ [[ -n "$row" ]] || { echo '[ERROR] Account not found.'; return 1; }
+ IFS='|' read -r email expired ip_limit quota_bytes <<< "$row"
+ user="${email%@*}"
+ [[ "$ip_limit" =~ ^[0-9]+$ ]] || ip_limit=0
+ [[ "$quota_bytes" =~ ^[0-9]+$ ]] || quota_bytes=0
+ detail_xray_member "$p" "$email" "$user" "$ip_limit" "$quota_bytes"
+}
+
+detail_xray_member(){
+ local p="$1" email="$2" user="$3" ip_limit="$4" quota_bytes="$5"
+ local live status current usage used_text limit_text last green red reset
+ green='\033[0;32m'; red='\033[0;31m'; reset='\033[0m'
+ usage=$(sync_usage_once "$p" "$email")
+ live=$(xray_live_state "$p" "$email")
+ IFS='|' read -r status current <<< "$live"
+ (( ip_limit > 0 )) && limit_text="$ip_limit" || limit_text='Unlimited'
+ (( quota_bytes > 0 )) && used_text="$(fmt_bytes "$usage") / $(fmt_bytes "$quota_bytes")" || used_text="$(fmt_bytes "$usage") / Unlimited"
+ last=$(xray_last_login "$p" "$email")
+  clear
+  action_header "$(proto_label "$p") User Login"
+  local white reset
+  white=$(kaizen_text_colour); reset=$(kaizen_reset)
+  printf '%bUser       : %s%b\n' "$white" "$user" "$reset"
+  if [[ "$status" == ONLINE ]]; then printf '%bStatus     : %bONLINE%b\n' "$white" "$(kaizen_green)" "$reset"; else printf '%bStatus     : %bOFFLINE%b\n' "$white" "$(kaizen_red)" "$reset"; fi
+  printf '%bCurrent IP : %s / %s%b\n' "$white" "$current" "$limit_text" "$reset"
+  printf '%bUsed Quota : %s%b\n' "$white" "$used_text" "$reset"
+  printf '%bLast Login : %s%b\n' "$white" "$last" "$reset"
+}
+
+simple_list(){
+ local p=$1 filter=${2:-all} email user locked reason expired ip_limit quota_bytes ip_text quota_text rows=0
+ clear; [[ -n "${ACTION_TITLE:-}" ]] && action_header "$ACTION_TITLE" || action_header "$(proto_label "$p") Account List"
+ local where="protocol='$p'"
+ case "$filter" in locked) where="$where AND locked=1";; unlocked) where="$where AND locked=0";; esac
+ if [[ "$filter" == locked ]]; then
+   KZN_UNLOCK_USER_W=16; KZN_UNLOCK_EXP_W=11; KZN_UNLOCK_REASON_W=10
+   while IFS='|' read -r email expired reason; do [[ -n "$email" ]] || continue; user="${email%@*}"; expired="${expired%% *}"; reason=${reason:-Manual}; ((${#user}>KZN_UNLOCK_USER_W))&&KZN_UNLOCK_USER_W=${#user}; ((${#expired}>KZN_UNLOCK_EXP_W))&&KZN_UNLOCK_EXP_W=${#expired}; ((${#reason}>KZN_UNLOCK_REASON_W))&&KZN_UNLOCK_REASON_W=${#reason}; done < <(sqlite3 -separator '|' "$DB" "SELECT email,expired,lock_reason FROM accounts WHERE $where ORDER BY email;")
+   kaizen_unlock_table_header
+   while IFS='|' read -r email expired reason; do [[ -n "$email" ]] || continue; rows=$((rows+1)); kaizen_unlock_table_row "${email%@*}" "$expired" "${reason:-Manual}"; done < <(sqlite3 -separator '|' "$DB" "SELECT email,expired,lock_reason FROM accounts WHERE $where ORDER BY email;")
+   kaizen_unlock_table_footer
+ else
+   kaizen_xray_table_header "$p"
+   while IFS='|' read -r email expired ip_limit quota_bytes locked reason; do
+     [[ -n "$email" ]] || continue; rows=$((rows+1)); user="${email%@*}"
+     [[ "$ip_limit" =~ ^[0-9]+$ ]] || ip_limit=0; [[ "$quota_bytes" =~ ^[0-9]+$ ]] || quota_bytes=0
+     ((ip_limit>0)) && ip_text="$ip_limit" || ip_text='UL'; ((quota_bytes>0)) && quota_text="$(fmt_bytes "$quota_bytes")" || quota_text='UL'
+     kaizen_xray_table_row "$user" "${expired%% *}" "$quota_text" "$ip_text"
+   done < <(sqlite3 -separator '|' "$DB" "SELECT email,expired,ip_limit,quota_bytes,locked,lock_reason FROM accounts WHERE $where ORDER BY email;")
+   kaizen_xray_table_footer
+ fi
+ ((rows>0)) || { [[ "$filter" == locked ]] && echo 'No locked account.' || echo 'No account found.'; return 1; }
+ return 0
+}
+resolve_account(){ local p=$1 wanted=$2; sqlite3 "$DB" "SELECT email FROM accounts WHERE protocol='$p' AND (email='$wanted' OR email LIKE '$wanted@%') LIMIT 1;"; }
+select_simple(){ local p=$1 prompt=${2:-'Enter username: '} filter=${3:-all} wanted; simple_list "$p" "$filter" || { CHOSEN=''; return 1; }; read -rp "$prompt" wanted; [[ -n "$wanted" ]] || { CHOSEN=''; return 1; }; CHOSEN=$(resolve_account "$p" "$wanted"); [[ -n "$CHOSEN" ]] || { echo '[ERROR] Account not found.'; return 1; }; }
+lock_account(){
+ local p=$1 e=$2 reason=${3:-Manual} quiet=${4:-0} locked
+ locked=$(sqlite3 "$DB" "SELECT locked FROM accounts WHERE protocol='$p' AND email='$e';"); [[ -n "$locked" ]] || { ((quiet)) || echo '[ERROR] Account not found.'; return 1; }; ((locked==1)) && return 0
+ delete_json "$p" "$e" || return 1; sqlite3 "$DB" "UPDATE accounts SET locked=1,lock_reason='${reason//\'/}' WHERE protocol='$p' AND email='$e';"; printf '%s\t%s\tLOCK\t%s\t%s\n' "$p" "$e" "$reason" "$(date '+%F %T')" >> "$REC"; restart_proto "$p"
+ ((quiet)) || { result_header "$(proto_label "$p") ACCOUNT LOCKED"; echo "Account : ${e%@*}"; echo "Reason  : $reason"; echo 'Status  : LOCKED'; }
+}
+unlock_account(){
+ local p=$1 e=$2 row cred locked
+ row=$(sqlite3 -separator '|' "$DB" "SELECT credential,locked FROM accounts WHERE protocol='$p' AND email='$e';")
+ [[ -n "$row" ]] || { echo '[ERROR] Account not found.'; return 1; }
+ IFS='|' read -r cred locked <<< "$row"
+ ((locked==1)) || { echo '[INFO] Account is already unlocked.'; return 0; }
+ # Clear historic IP/login state BEFORE restoring the credential.
+ clear_account_login_state "$p" "$e"
+ add_json "$p" "$e" "$cred" || return 1
+ sqlite3 "$DB" "UPDATE accounts SET locked=0,lock_reason='' WHERE protocol='$p' AND email='$e';"
+ printf '%s\t%s\tUNLOCK\tManual\t%s\n' "$p" "$e" "$(date '+%F %T')" >> "$REC"
+ restart_proto "$p"
+ # Service restart resets Xray user counters; use the new zero/current value as baseline.
+ sleep 1
+ clear_account_login_state "$p" "$e"
+ result_header "$(proto_label "$p") ACCOUNT UNLOCKED"; echo "Account : ${e%@*}"; echo "Status  : UNLOCKED"; echo "Login/IP History : CLEARED"
+}
+lock_menu(){ local p=$1 reason ans; select_simple "$p" 'Enter username to lock: ' unlocked || return; read -rp 'Reason [Manual]: ' reason; reason=${reason:-Manual}; read -rp "Lock $(proto_label "$p") account '${CHOSEN%@*}'? (y/n): " ans; [[ "$ans" =~ ^[Yy]$ ]] || { echo 'Cancelled.'; return; }; lock_account "$p" "$CHOSEN" "$reason"; }
+unlock_menu(){ local p=$1; select_simple "$p" 'Enter username to unlock: ' locked || return; unlock_account "$p" "$CHOSEN"; }
+delete_permanent(){
+ local p=$1 e=${2:-} ans; if [[ -z "$e" ]]; then select_simple "$p" 'Enter username to delete: ' || return; e=$CHOSEN; fi; read -rp "Delete ${e%@*}? [y/N]: " ans; [[ "$ans" =~ ^[Yy]$ ]] || { echo 'Cancelled.'; return; }
+ delete_json "$p" "$e" 2>/dev/null || true; sqlite3 "$DB" "DELETE FROM accounts WHERE protocol='$p' AND email='$e';"; rm -f "$BASE/limit/xray/$p/ip/$e" "$BASE/limit/xray/$p/quota/$e" "$BASE/limit/xray/$p/usage/$e" "$BASE/limit/xray/$p/cache/$e" 2>/dev/null || true; restart_proto "$p"; result_header "$(proto_label "$p") ACCOUNT DELETED"; echo "Account : ${e%@*}"; echo "Status  : DELETED"
+}
+choose(){ local p=$1; select_simple "$p" 'Enter username: '; }
+extend(){
+ local p=$1 wanted old answer custom days new base now
+ simple_list "$p" || return 1
+ read -rp 'Enter username to extend: ' wanted
+ [[ -n "$wanted" ]] || return 1
+ CHOSEN=$(resolve_account "$p" "$wanted"); [[ -n "$CHOSEN" ]] || { echo '[ERROR] Account not found.'; return 1; }
+ old=$(sqlite3 "$DB" "SELECT expired FROM accounts WHERE protocol='$p' AND email='$CHOSEN';")
+ [[ -n "$old" ]] || { echo '[ERROR] Account not found.'; return 1; }
+ read -rp 'Use custom expired date? (y/n): ' answer
+ if [[ "$answer" =~ ^[Yy]$ ]]; then
+   read -rp 'Custom expired (YYYY-MM-DD): ' custom
+   [[ "$custom" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]] || { echo '[ERROR] Use format YYYY-MM-DD.'; return 1; }
+   new=$(date -d "$custom $(date '+%T')" '+%F %T' 2>/dev/null) || { echo '[ERROR] Invalid date.'; return 1; }
+ else
+   read -rp 'Extend (days): ' days
+   [[ "$days" =~ ^[0-9]+$ && "$days" -gt 0 ]] || { echo '[ERROR] Days must be greater than 0.'; return 1; }
+   now=$(date '+%F %T')
+   local old_epoch now_epoch base_epoch new_epoch
+   old_epoch=$(date -d "$old" +%s 2>/dev/null) || { echo '[ERROR] Invalid current expiry date.'; return 1; }
+   now_epoch=$(date -d "$now" +%s 2>/dev/null) || return 1
+   if (( old_epoch > now_epoch )); then base_epoch=$old_epoch; else base_epoch=$now_epoch; fi
+   new_epoch=$((base_epoch + (days * 86400)))
+   new=$(date -d "@$new_epoch" '+%F %T') || return 1
+ fi
+ sqlite3 "$DB" "UPDATE accounts SET expired='$new' WHERE protocol='$p' AND email='$CHOSEN';"
+ result_header "$(proto_label "$p") ACCOUNT EXTENDED"; echo "Account      : ${CHOSEN%@*}"; echo "Previous     : $old"; echo "New Expiry   : $new"; echo 'Status       : SUCCESS'
+}
+change_ip(){
+ local p=$1; select_simple "$p" 'Enter username to edit IP limit: ' || return 1; local old n; old=$(sqlite3 "$DB" "SELECT ip_limit FROM accounts WHERE protocol='$p' AND email='$CHOSEN';"); read -rp 'New IP limit (0 = unlimited): ' n; [[ $n =~ ^[0-9]+$ ]] || { echo '[ERROR] IP limit must be a number.'; return 1; }; sqlite3 "$DB" "UPDATE accounts SET ip_limit=$n WHERE protocol='$p' AND email='$CHOSEN';"; echo "$n" > "$BASE/limit/xray/$p/ip/$CHOSEN"; result_header "$(proto_label "$p") IP LIMIT UPDATED"; echo "Account      : ${CHOSEN%@*}"; echo "Previous     : $old"; echo "New Limit    : $n"; echo "Status       : SUCCESS"
+}
+change_ip_all(){ local p=$1 n ans; simple_list "$p"; read -rp 'New IP limit for ALL accounts (0 = unlimited): ' n; [[ $n =~ ^[0-9]+$ ]] || return 1; read -rp 'Apply to ALL accounts? [y/N]: ' ans; [[ $ans =~ ^[Yy]$ ]] || return; sqlite3 "$DB" "UPDATE accounts SET ip_limit=$n WHERE protocol='$p';"; while read -r e; do echo "$n" > "$BASE/limit/xray/$p/ip/$e"; done < <(sqlite3 "$DB" "SELECT email FROM accounts WHERE protocol='$p';"); result_header "$(proto_label "$p") IP LIMIT ALL UPDATED"; echo "New Limit    : $n"; echo "Status       : SUCCESS"; }
+change_quota(){
+ local p=$1; select_simple "$p" 'Enter username to edit quota: ' || return 1; local oldb n b; oldb=$(sqlite3 "$DB" "SELECT quota_bytes FROM accounts WHERE protocol='$p' AND email='$CHOSEN';"); read -rp 'New quota GB (0 = unlimited): ' n; [[ $n =~ ^[0-9]+$ ]] || return 1; b=0; ((n>0)) && b=$((n*1024*1024*1024)); sqlite3 "$DB" "UPDATE accounts SET quota_bytes=$b WHERE protocol='$p' AND email='$CHOSEN';"; echo "$b" > "$BASE/limit/xray/$p/quota/$CHOSEN"; result_header "$(proto_label "$p") QUOTA UPDATED"; echo "Account      : ${CHOSEN%@*}"; echo "Previous     : $(fmt_bytes "$oldb")"; echo "New Quota    : $([[ $b -eq 0 ]] && echo Unlimited || fmt_bytes "$b")"; echo "Status       : SUCCESS"
+}
+change_quota_all(){ local p=$1 n ans b; simple_list "$p"; read -rp 'New quota GB for ALL accounts (0 = unlimited): ' n; [[ $n =~ ^[0-9]+$ ]] || return 1; read -rp 'Apply to ALL accounts? [y/N]: ' ans; [[ $ans =~ ^[Yy]$ ]] || return; b=0; ((n>0)) && b=$((n*1024*1024*1024)); sqlite3 "$DB" "UPDATE accounts SET quota_bytes=$b WHERE protocol='$p';"; while read -r e; do echo "$b" > "$BASE/limit/xray/$p/quota/$e"; done < <(sqlite3 "$DB" "SELECT email FROM accounts WHERE protocol='$p';"); result_header "$(proto_label "$p") QUOTA ALL UPDATED"; echo "New Quota    : $([[ $b -eq 0 ]] && echo Unlimited || fmt_bytes "$b")"; echo "Status       : SUCCESS"; }
+modify(){
+ local p=$1; choose "$p"; [[ -n ${CHOSEN:-} ]] || return 1
+ local old; old=$(sqlite3 "$DB" "SELECT credential FROM accounts WHERE protocol='$p' AND email='$CHOSEN';")
+ [[ -n $old ]] || { echo '[ERROR] Account not found.'; return 1; }
+ read -rp 'New UUID/password (blank = generate): ' n; if [[ -z $n ]]; then [[ $p == trojan ]] && n=$(cat /proc/sys/kernel/random/uuid|tr -d '-') || n=$(cat /proc/sys/kernel/random/uuid); fi
+ update_credential_json "$p" "$CHOSEN" "$n"; sqlite3 "$DB" "UPDATE accounts SET credential='$n' WHERE protocol='$p' AND email='$CHOSEN';"; restart_proto "$p"
+ result_header "$(proto_label "$p") UUID UPDATED"; echo "Account        : ${CHOSEN%@*}"; echo "New UUID       : $n"; echo 'Status         : SUCCESS'
+}
+check_login(){
+ local p="${1:-}" api tmp1 tmp2 line title found email ip_limit quota_bytes total1 total2 login_count usage quota_text user iptext cache old delta
+ valid_proto "$p" || { echo '[ERROR] Invalid protocol.'; return 1; }
+ api="127.0.0.1:$(api_port "$p")"
+ tmp1=$(mktemp "/tmp/xray-${p}-check1.XXXXXX")
+ tmp2=$(mktemp "/tmp/xray-${p}-check2.XXXXXX")
+ "$XRAY_BIN" api statsquery --server="$api" >"$tmp1" 2>/dev/null || echo '{"stat":[]}' >"$tmp1"
+ sleep 2
+ "$XRAY_BIN" api statsquery --server="$api" >"$tmp2" 2>/dev/null || echo '{"stat":[]}' >"$tmp2"
+ stat_total_file(){ local f=$1 e=$2; jq -r --arg e "$e" '[.stat[]? | select(.name == ("user>>>"+$e+">>>traffic>>>uplink") or .name == ("user>>>"+$e+">>>traffic>>>downlink")) | (.value // 0)] | add // 0' "$f" 2>/dev/null || echo 0; }
+ line='----------------------------------'; title="${p^^} User Login"; found=0
+ clear; action_header "Check $(proto_label "$p") Login"; echo "$line"; printf '       \033[0;33m[ %s ]\033[0m\n' "$title"; echo "$line"
+ while IFS='|' read -r email ip_limit quota_bytes; do
+   [[ -n "$email" ]] || continue
+   total1=$(stat_total_file "$tmp1" "$email"); [[ "$total1" =~ ^[0-9]+$ ]] || total1=0
+   total2=$(stat_total_file "$tmp2" "$email"); [[ "$total2" =~ ^[0-9]+$ ]] || total2=0
+   # Only users with traffic moving NOW are shown in Check Login.
+   (( total2 > total1 )) || continue
+   found=1
+   login_count=$(xray_recent_ips "$p" "$email" 300 | awk 'NF{n++} END{print n+0}')
+   (( login_count < 1 )) && login_count=1
+   [[ "$ip_limit" =~ ^[0-9]+$ ]] || ip_limit=0; (( ip_limit > 0 )) && iptext="$ip_limit" || iptext='Unlimited'
+   [[ "$quota_bytes" =~ ^[0-9]+$ ]] || quota_bytes=0
+   mkdir -p "$BASE/limit/xray/$p/usage" "$BASE/limit/xray/$p/cache"
+   old=$(cat "$BASE/limit/xray/$p/cache/$email" 2>/dev/null || echo 0); [[ "$old" =~ ^[0-9]+$ ]] || old=0
+   usage=$(cat "$BASE/limit/xray/$p/usage/$email" 2>/dev/null || echo 0); [[ "$usage" =~ ^[0-9]+$ ]] || usage=0
+   if (( total2 >= old )); then delta=$((total2-old)); else delta=$total2; fi
+   usage=$((usage+delta)); echo "$usage" > "$BASE/limit/xray/$p/usage/$email"; echo "$total2" > "$BASE/limit/xray/$p/cache/$email"
+   (( quota_bytes > 0 )) && quota_text="$(fmt_bytes "$usage") / $(fmt_bytes "$quota_bytes")" || quota_text="$(fmt_bytes "$usage") / Unlimited"
+   user="${email%@*}"
+   printf 'User  : %s\n' "$user"
+   printf 'Login : %s / %s IP\n' "$login_count" "$iptext"
+   printf 'Quota : %s\n' "$quota_text"
+   echo "$line"
+ done < <(sqlite3 -separator '|' "$DB" "SELECT email,ip_limit,quota_bytes FROM accounts WHERE protocol='$p' ORDER BY email;")
+ rm -f "$tmp1" "$tmp2"
+ if (( found == 0 )); then echo 'No active user login.'; echo "$line"; fi
+}
+config(){ local p=$1; ${EDITOR:-nano} "$(json "$p")"; "$XRAY_BIN" run -test -config "$(json "$p")" && restart_proto "$p"; }
+recovery(){ local p=$1; grep -P "^$p\t" "$REC" | tail -30 || true; echo 'Recovery records are kept here. Recreate the account with the same email if needed.'; }
+expire(){
+ local target=${1:-all} now p e changed
+ now=$(date '+%F %T')
+ for p in vless vmess trojan; do
+   [[ $target != all && $target != $p ]] && continue
+   changed=0
+   while read -r e; do
+     [[ -n "$e" ]] || continue
+     delete_json "$p" "$e" 2>/dev/null || true
+     sqlite3 "$DB" "DELETE FROM accounts WHERE protocol='$p' AND email='$e';"
+     rm -f "$BASE/limit/xray/$p/ip/$e" "$BASE/limit/xray/$p/quota/$e" "$BASE/limit/xray/$p/usage/$e" "$BASE/limit/xray/$p/cache/$e"
+     printf '%s	%s	EXPIRED_DELETE	%s
+' "$p" "$e" "$(date '+%F %T')" >> "$REC"
+     changed=1
+   done < <(sqlite3 "$DB" "SELECT email FROM accounts WHERE protocol='$p' AND expired <= '$now';")
+   ((changed==1)) && restart_proto "$p"
+ done
+}
+quota_daemon(){
+ local p=$1 port=$2 api tmp email data old usage delta ip_limit quota_bytes locked ip_count reason
+ api="127.0.0.1:$port"
+ while sleep 5; do
+   tmp=$(mktemp "/tmp/xray-${p}-quota.XXXXXX"); "$XRAY_BIN" api statsquery --server="$api" >"$tmp" 2>/dev/null || { rm -f "$tmp"; continue; }
+   while IFS='|' read -r email ip_limit quota_bytes locked; do
+     [[ -n "$email" ]] || continue; ((locked==0)) || continue
+     data=$(jq -r --arg e "$email" '[.stat[]? | select(.name == ("user>>>"+$e+">>>traffic>>>uplink") or .name == ("user>>>"+$e+">>>traffic>>>downlink")) | (.value // 0)] | add // 0' "$tmp" 2>/dev/null || echo 0); [[ "$data" =~ ^[0-9]+$ ]] || data=0
+     old=$(cat "$BASE/limit/xray/$p/cache/$email" 2>/dev/null || echo 0); usage=$(cat "$BASE/limit/xray/$p/usage/$email" 2>/dev/null || echo 0); [[ "$old" =~ ^[0-9]+$ ]] || old=0; [[ "$usage" =~ ^[0-9]+$ ]] || usage=0
+     if ((data>=old)); then delta=$((data-old)); else delta=$data; fi; usage=$((usage+delta)); echo "$usage" > "$BASE/limit/xray/$p/usage/$email"; echo "$data" > "$BASE/limit/xray/$p/cache/$email"
+     reason=''; if ((quota_bytes>0 && usage>=quota_bytes)); then reason="Quota Limit ($(fmt_bytes "$usage") / $(fmt_bytes "$quota_bytes"))"; fi
+     if [[ -z "$reason" ]] && ((ip_limit>0)); then ip_count=$(xray_recent_ips "$p" "$email" 180 | awk 'NF{n++} END{print n+0}'); ((ip_count>ip_limit)) && reason="IP Limit ($ip_count/$ip_limit)"; fi
+     if [[ -n "$reason" ]]; then lock_account "$p" "$email" "$reason" 1; break; fi
+   done < <(sqlite3 -separator '|' "$DB" "SELECT email,ip_limit,quota_bytes,locked FROM accounts WHERE protocol='$p';")
+   rm -f "$tmp"
+ done
+}
+limit_check(){ local p=$1 e ip q locked u c; while IFS='|' read -r e ip q locked; do [[ -n "$e" ]] || continue; ((locked==0)) || continue; u=$(cat "$BASE/limit/xray/$p/usage/$e" 2>/dev/null || echo 0); [[ "$u" =~ ^[0-9]+$ ]] || u=0; if ((q>0&&u>=q)); then lock_account "$p" "$e" "Quota Limit" 1; continue; fi; if ((ip>0)); then c=$(xray_recent_ips "$p" "$e" 180|awk 'NF{n++}END{print n+0}'); ((c>ip)) && lock_account "$p" "$e" "IP Limit ($c/$ip)" 1; fi; done < <(sqlite3 -separator '|' "$DB" "SELECT email,ip_limit,quota_bytes,locked FROM accounts WHERE protocol='$p';"); }
+count(){ sqlite3 "$DB" "SELECT count(*) FROM accounts WHERE protocol='$1';"; }
+show(){
+ local p=$1; select_simple "$p" 'Enter username to check config: ' || return 1
+ local r c x; r=$(sqlite3 -separator '|' "$DB" "SELECT credential,expired FROM accounts WHERE protocol='$p' AND email='$CHOSEN';")
+ [[ -n $r ]] || { echo '[ERROR] Account not found.'; return 1; }
+ IFS='|' read -r c x <<< "$r"
+ clear; action_header "$(proto_label "$p") Account Information"
+ links "$p" "$CHOSEN" "$c" "$(domain)" "$x"
+}
+
+cmd=${1:-}; shift || true
+case "$cmd" in
+ create) ACTION_TITLE="Create $(proto_label "${1:-}") Account"; create "$@";; custom-create) ACTION_TITLE="Create $(proto_label "${1:-}") Account [Custom UUID, IP, Quota]"; create "$1" custom;; trial) ACTION_TITLE="Create $(proto_label "${1:-}") Trial Account"; create "$1" trial;; list) ACTION_TITLE="List $(proto_label "${1:-}") Account"; list "$1";; delete) ACTION_TITLE="Delete $(proto_label "${1:-}") Account"; delete_permanent "$@";; extend) ACTION_TITLE="Extend $(proto_label "${1:-}") Account"; extend "$1";; lock) ACTION_TITLE="Lock $(proto_label "${1:-}") Account"; lock_menu "$1";; unlock) ACTION_TITLE="Unlock $(proto_label "${1:-}") Account"; unlock_menu "$1";; change-ip) ACTION_TITLE="Edit Limit IP"; change_ip "$1";; change-ip-all) ACTION_TITLE="Edit Limit IP All"; change_ip_all "$1";; change-quota) ACTION_TITLE="Edit Limit Quota"; change_quota "$1";; change-quota-all) ACTION_TITLE="Edit Limit Quota All"; change_quota_all "$1";; modify) modify "$1";; check) ACTION_TITLE="Check $(proto_label "${1:-}") Login"; check_login "$1";; config) config "$1";; recovery) recovery "$1";; expire) expire "${1:-all}";; quota-daemon) quota_daemon "$1" "$(api_port "$1")";; limit-check) limit_check "$1";; count) count "$1";; show) ACTION_TITLE="Check $(proto_label "${1:-}") Config"; show "$1";; *) echo 'Usage: xray-account {create|custom-create|trial|list|delete|extend|lock|unlock|change-ip|change-ip-all|change-quota|change-quota-all|check|expire|quota-daemon|limit-check|count|show} <vless|vmess|trojan>';; esac
+
+__KZN_XRAY_ACCOUNT__
+chmod 0755 "$RERE/xray-account"
+bash -n "$RERE/xray-account"
+
+[[ -f "$RERE/detail" ]] && cp -a "$RERE/detail" "$BACKUP/rere/detail" || true
+cat > "$RERE/detail" <<'__KZN_DETAIL__'
+#!/usr/bin/env bash
+source /usr/local/rere/kaizen-ui 2>/dev/null || true
+CYAN='\e[0;36m'; WHITE='\e[0;97m'; GREEN='\e[0;32m'; plain='\e[0m'
+clear; echo; kaizen_header ' • PORT & PROTOCOL DETAIL • '
+echo -e "${CYAN}  SSH / VPN${plain}"
+echo -e "${WHITE}  OpenSSH                  : ${GREEN}22${plain}"
+echo -e "${WHITE}  Dropbear                 : ${GREEN}111${plain}"
+echo -e "${WHITE}  SSH WebSocket Non-TLS    : ${GREEN}80, 2080, 2082, 8000, 8080, 8880${plain}"
+echo -e "${WHITE}  SSH WebSocket TLS        : ${GREEN}443, 8443${plain}"
+echo -e "${WHITE}  OpenVPN TCP / UDP        : ${GREEN}1194 / 2200${plain}"
+echo -e "${WHITE}  SOCKS5                   : ${GREEN}1080${plain}"
+echo -e "${WHITE}  HTTP Proxy               : ${GREEN}3128${plain}"
+echo -e "${WHITE}  UDP Custom               : ${GREEN}1-65535${plain}"
+echo -e "${WHITE}  BadVPN/UDPGW             : ${GREEN}7100-7900${plain}"
+echo
+echo -e "${CYAN}  XRAY SHARED TLS ENTRY${plain}"
+echo -e "${WHITE}  Vless/Vmess/Trojan       : ${GREEN}443, 8443, 8999, 9443, 9755, 400-777${plain}"
+echo
+echo -e "${CYAN}  XRAY SHARED NON-TLS ENTRY${plain}"
+echo -e "${WHITE}  Vless/Vmess/Trojan       : ${GREEN}80-108, 8000, 8080-8180, 8880,${plain}"
+echo -e "${WHITE}                             ${GREEN}2084-2085, 2088-2094, 2097-2199${plain}"
+echo
+echo -e "${CYAN}  XRAY TCP HTTP DEDICATED${plain}"
+echo -e "${WHITE}  Vless TCP TLS/Non-TLS    : ${GREEN}2083 / 2082${plain}"
+echo -e "${WHITE}  Vmess TCP TLS/Non-TLS    : ${GREEN}2087 / 2086${plain}"
+echo -e "${WHITE}  Trojan TCP TLS/Non-TLS   : ${GREEN}2096 / 2095${plain}"
+echo
+echo -e "${CYAN}  XRAY PATH / SERVICE${plain}"
+echo -e "${WHITE}  Vless WS Multipath       : ${GREEN}/${plain}"
+echo -e "${WHITE}  Vless WS                 : ${GREEN}/vless${plain}"
+echo -e "${WHITE}  Vless HTTPUpgrade        : ${GREEN}/hu-vless${plain}"
+echo -e "${WHITE}  Vless XHTTP              : ${GREEN}/xhttpvl${plain}"
+echo -e "${WHITE}  Vless gRPC               : ${GREEN}vless-grpc${plain}"
+echo -e "${WHITE}  Vmess WS                 : ${GREEN}/vmess${plain}"
+echo -e "${WHITE}  Vmess HTTPUpgrade        : ${GREEN}/hu-vmess${plain}"
+echo -e "${WHITE}  Vmess XHTTP              : ${GREEN}/xhttpvm${plain}"
+echo -e "${WHITE}  Vmess gRPC               : ${GREEN}vmess-grpc${plain}"
+echo -e "${WHITE}  Trojan WS                : ${GREEN}/trojan${plain}"
+echo -e "${WHITE}  Trojan HTTPUpgrade       : ${GREEN}/hu-trojan${plain}"
+echo -e "${WHITE}  Trojan XHTTP             : ${GREEN}/xhttptr${plain}"
+echo -e "${WHITE}  Trojan gRPC              : ${GREEN}trojan-grpc${plain}"
+echo -e "${WHITE}  TCP HTTP                 : ${GREEN}/${plain}"
+
+__KZN_DETAIL__
+chmod 0755 "$RERE/detail"
+bash -n "$RERE/detail"
+
+[[ -f "$RERE/menu-system" ]] && cp -a "$RERE/menu-system" "$BACKUP/rere/menu-system" || true
+cat > "$RERE/menu-system" <<'__KZN_MENU_SYSTEM__'
+#!/usr/bin/env bash
+source /usr/local/rere/kaizen-ui 2>/dev/null || true
+RED='\e[0;31m'; GREEN='\e[0;32m'; YELLOW='\e[0;33m'; CYAN='\e[0;36m'; WHITE='\e[0;97m'; plain='\e[0m'; bgPutih='\e[0;47;30m'; keatas="${CYAN}│${plain}"
+cmd(){ printf '  '; local i; for i in {52..57} {57..52}; do printf "\e[38;5;${i}m────\e[0m"; done; echo; }
+invalid(){ echo; echo -e "${RED}Invalid option, please try again!${plain}"; sleep 1; }
+header(){ clear; echo; if declare -F kaizen_header >/dev/null; then kaizen_header " • $1 • "; else echo -e "${CYAN}┌─────────────────────────────────────────────────┐${plain}"; printf "${CYAN}│${plain}${bgPutih}%49s${plain}${CYAN}│${plain}\n" " $1"; echo -e "${CYAN}└─────────────────────────────────────────────────┘${plain}"; fi; }
+result_title(){ header "$1"; }
+
+change_banner(){
+ result_title 'CHANGE SSH BANNER'
+ read -rp 'Input your SSH banner: ' bns
+ printf '%s\n' "$bns" > /etc/issue.net
+ systemctl daemon-reload
+ for s in ssh sshd dropbear ws-stunnel multiplex ws-dual; do systemctl cat "$s" >/dev/null 2>&1 && systemctl restart "$s" >/dev/null 2>&1 || true; done
+ echo -e "${GREEN}SSH banner updated successfully.${plain}"
+}
+
+system_status(){
+ result_title 'SYSTEM STATUS'
+ local uptime_text cpu_load ram_total ram_used ram_pct disk_total disk_used disk_pct
+ uptime_text=$(uptime -p 2>/dev/null | sed 's/^up //' || echo '-')
+ cpu_load=$(awk '{print $1" / "$2" / "$3}' /proc/loadavg 2>/dev/null || echo '-')
+ ram_total=$(free -m | awk '/^Mem:/ {print $2}')
+ ram_used=$(free -m | awk '/^Mem:/ {print $3}')
+ if [[ ${ram_total:-0} -gt 0 ]]; then ram_pct=$((ram_used*100/ram_total)); else ram_pct=0; fi
+ read -r disk_total disk_used disk_pct < <(df -h / | awk 'NR==2 {print $2, $3, $5}')
+ echo -e "${WHITE}  Uptime      : ${GREEN}${uptime_text:-'-'}${plain}"
+ echo -e "${WHITE}  CPU Load    : ${GREEN}${cpu_load:-'-'}${plain}"
+ echo -e "${WHITE}  RAM Usage   : ${GREEN}${ram_used:-0} MB / ${ram_total:-0} MB (${ram_pct}%)${plain}"
+ echo -e "${WHITE}  SSD Usage   : ${GREEN}${disk_used:-'-'} / ${disk_total:-'-'} (${disk_pct:-'-'})${plain}"
+ echo -e "${WHITE}  CPU Cores   : ${GREEN}$(nproc 2>/dev/null || echo '-')${plain}"
+ echo -e "${WHITE}  Kernel      : ${GREEN}$(uname -r)${plain}"
+}
+
+restart_all(){
+ result_title 'RESTART ALL SERVICE'
+ echo -e "${WHITE}Restarting installed services...${plain}"; echo
+ services=(ssh sshd dropbear multiplex ws-stunnel ws-dual cron xray-vless xray-vmess xray-trojan haproxy sslh nginx openvpn dnstt udp-custom api v2ray xray-quota@vless xray-quota@vmess xray-quota@trojan)
+ for s in "${services[@]}"; do
+   if systemctl cat "$s" >/dev/null 2>&1; then
+     if systemctl restart "$s" >/dev/null 2>&1; then printf "${GREEN}[OK]${plain}   ${WHITE}%s${plain}\n" "$s"; else printf "${RED}[FAIL]${plain} ${WHITE}%s${plain}\n" "$s"; fi
+   fi
+ done
+ [[ -f /etc/xray/domargo ]] && systemctl cat cloudflared >/dev/null 2>&1 && systemctl restart cloudflared >/dev/null 2>&1 || true
+}
+
+choose_region(){
+ local region=$1 zones choice
+ mapfile -t zones < <(timedatectl list-timezones | grep -E "^${region}/")
+ ((${#zones[@]}>0)) || { result_title 'CHANGE TIMEZONE'; echo -e "${RED}No timezone found.${plain}"; return; }
+ while true; do
+   header "${region} TIMEZONES"
+   local i; for i in "${!zones[@]}"; do printf "  ${CYAN}[%02d]${plain} ${WHITE}%s${plain}\n" "$((i+1))" "${zones[$i]}"; done
+   cmd; echo -e "  ${CYAN}[ x]${plain} ${WHITE}Back${plain}"; cmd; echo
+   read -rp " $(echo -e "${WHITE}Select timezone:${plain} ")" choice
+   [[ "$choice" =~ ^[Xx]$ ]] && return
+   if [[ "$choice" =~ ^[0-9]+$ ]] && ((choice>=1 && choice<=${#zones[@]})); then
+     timedatectl set-timezone "${zones[$((choice-1))]}" && { result_title 'TIMEZONE UPDATED'; echo -e "${GREEN}Timezone changed to ${zones[$((choice-1))]}.${plain}"; }; return
+   fi
+   invalid
+ done
+}
+
+change_timezone(){
+ while true; do
+  header 'CHANGE TIMEZONE'
+  echo -e "  ${CYAN}[01]${plain} ${WHITE}Africa${plain}"
+  echo -e "  ${CYAN}[02]${plain} ${WHITE}America${plain}"
+  echo -e "  ${CYAN}[03]${plain} ${WHITE}Antarctica${plain}"
+  echo -e "  ${CYAN}[04]${plain} ${WHITE}Asia${plain}"
+  echo -e "  ${CYAN}[05]${plain} ${WHITE}Atlantic${plain}"
+  echo -e "  ${CYAN}[06]${plain} ${WHITE}Australia${plain}"
+  echo -e "  ${CYAN}[07]${plain} ${WHITE}Europe${plain}"
+  echo -e "  ${CYAN}[08]${plain} ${WHITE}Indian${plain}"
+  echo -e "  ${CYAN}[09]${plain} ${WHITE}Pacific${plain}"
+  echo -e "  ${CYAN}[10]${plain} ${WHITE}View Current Time Zone${plain}"
+  cmd; echo -e "  ${CYAN}[ x]${plain} ${WHITE}Back${plain}"; cmd; echo
+  read -rp " $(echo -e "${WHITE}Please select an option [01-10 or x]:${plain} ")" opt
+  case "$opt" in
+   1|01) choose_region Africa;; 2|02) choose_region America;; 3|03) choose_region Antarctica;; 4|04) choose_region Asia;;
+   5|05) choose_region Atlantic;; 6|06) choose_region Australia;; 7|07) choose_region Europe;; 8|08) choose_region Indian;; 9|09) choose_region Pacific;;
+   10) result_title 'CURRENT TIMEZONE'; timedatectl; read -rp 'Press Enter to continue...' _;; x|X) return;; *) invalid;;
+  esac
+ done
+}
+
+MREINSTALL_URL='https://raw.githubusercontent.com/rewasu91/Management-System/refs/heads/main/mreinstall'
+MREINSTALL_FILE='/root/mreinstall'
+
+rebuild_vps(){
+ result_title 'REINSTALL / REBUILD VPS'
+ echo -e "${WHITE}Downloading latest VPS reinstall manager...${plain}"
+ echo
+
+ if ! curl -fL --retry 3 --retry-delay 2 --connect-timeout 10 --max-time 60 \
+   "$MREINSTALL_URL" -o "$MREINSTALL_FILE"; then
+   echo
+   echo -e "${RED}Failed to download VPS reinstall manager.${plain}"
+   echo -e "${WHITE}Source:${plain}"
+   echo -e "${CYAN}${MREINSTALL_URL}${plain}"
+   echo
+   read -rp 'Press Enter to continue...' _
+   return
+ fi
+
+ if [[ ! -s "$MREINSTALL_FILE" ]]; then
+   echo -e "${RED}Downloaded reinstall manager is empty.${plain}"
+   rm -f "$MREINSTALL_FILE"
+   read -rp 'Press Enter to continue...' _
+   return
+ fi
+
+ chmod 700 "$MREINSTALL_FILE"
+
+ if ! bash -n "$MREINSTALL_FILE"; then
+   echo
+   echo -e "${RED}Downloaded reinstall manager failed Bash syntax validation.${plain}"
+   read -rp 'Press Enter to continue...' _
+   return
+ fi
+
+ clear
+ bash "$MREINSTALL_FILE"
+ local rc=$?
+
+ if (( rc != 0 )); then
+   echo
+   echo -e "${YELLOW}Reinstall manager exited with status ${rc}.${plain}"
+   read -rp 'Press Enter to continue...' _
+   return
+ fi
+
+ result_title 'REINSTALL PREPARED'
+ echo -e "${GREEN}Reinstall setup completed successfully.${plain}"
+ echo -e "${YELLOW}VPS will reboot automatically in 5 seconds...${plain}"
+ sync
+ sleep 5
+ systemctl reboot || reboot
+}
+
+while true; do
+ header 'MENU SYSTEM VPS'
+ echo -e "  ${CYAN}[01]${plain} ${WHITE}Domain Manager${plain}"
+ echo -e "  ${CYAN}[02]${plain} ${WHITE}Backup Manager${plain}"
+ echo -e "  ${CYAN}[03]${plain} ${WHITE}Change Timezone${plain}"
+ echo -e "  ${CYAN}[04]${plain} ${WHITE}Restart All Service${plain}"
+ echo -e "  ${CYAN}[05]${plain} ${WHITE}Adjust Text Brightness${plain}"
+ echo -e "  ${CYAN}[06]${plain} ${WHITE}Check Streaming Country Status${plain}"
+ echo -e "  ${CYAN}[07]${plain} ${WHITE}Menu Bot Manager${plain}"
+ echo -e "  ${CYAN}[08]${plain} ${WHITE}ON/OFF IPV6${plain}"
+ echo -e "  ${CYAN}[09]${plain} ${WHITE}Reinstall / Rebuild VPS${plain}"
+ echo -e "  ${CYAN}[10]${plain} ${WHITE}Check Detail Port & Protocol${plain}"
+ echo -e "  ${CYAN}[11]${plain} ${WHITE}Check Status: Uptime, CPU, RAM & SSD${plain}"
+ echo -e "  ${CYAN}[12]${plain} ${WHITE}Setup Cloudflare Argo Tunnel Routing${plain}"
+ echo -e "  ${CYAN}[13]${plain} ${WHITE}Change SSH Banner${plain}"
+ echo -e "  ${CYAN}[14]${plain} ${WHITE}Setup Service (ON/OFF)${plain}"
+ echo -e "  ${CYAN}[15]${plain} ${WHITE}Menu API / REST API Support${plain}"
+ echo -e "  ${CYAN}[16]${plain} ${WHITE}Menu Admin VPS${plain}"
+ echo -e "  ${CYAN}[17]${plain} ${WHITE}Back to Main Menu${plain}"
+ cmd; echo -e "  ${CYAN}[ x]${plain} ${WHITE}Exit${plain}"; cmd; echo
+ read -rp " $(echo -e "${WHITE}Please select an option [01-17 or x]:${plain} ")" asu
+ case "$asu" in
+  1|01) menu-domain;; 2|02) bmenu;; 3|03) change_timezone;; 4|04) restart_all; read -rp 'Press Enter to continue...' _;;
+  5|05) adjust-text-brightness; exec menu-system;; 6|06) check-streaming-country;; 7|07) bot-menu;; 8|08) ipv6-control;; 9|09) rebuild_vps;;
+  10) detail; read -rp 'Press Enter to continue...' _;; 11) system_status; read -rp 'Press Enter to continue...' _;; 12) menu-argo;; 13) change_banner; read -rp 'Press Enter to continue...' _;; 14) fn-sc1;; 15) menu-api;; 16) menu-admin;; 17) exec menu;;
+  x|X) clear; exit 0;; *) invalid;;
+ esac
+done
+
+__KZN_MENU_SYSTEM__
+chmod 0755 "$RERE/menu-system"
+bash -n "$RERE/menu-system"
+
+[[ -f "$RERE/addss" ]] && cp -a "$RERE/addss" "$BACKUP/rere/addss" || true
+cat > "$RERE/addss" <<'__KZN_ADDSS__'
+#!/usr/bin/env bash
+source /usr/local/rere/kaizen-ui 2>/dev/null || true
+
+# Informasi
+telegram_bot_token=$(cat /etc/kaizensc/bot/notif/bot.key)
+telegram_chatid=$(cat /etc/kaizensc/bot/notif/client.id)
+domain=$(cat /etc/xray/domain)
+lastport1=$(grep "port_tls" /etc/shadowsocks-libev/akun.conf | tail -n1 | awk '{print $2}')
+lastport2=$(grep "port_http" /etc/shadowsocks-libev/akun.conf | tail -n1 | awk '{print $2}')
+if [[ $lastport1 == '' ]]; then
+tls=2443
+else
+tls="$((lastport1+1))"
+fi
+if [[ $lastport2 == '' ]]; then
+http=3443
+else
+http="$((lastport2+1))"
+fi
+clear
+kaizen_header " • Create Shadowsocks Account • "
+echo
+until [[ $user =~ ^[a-zA-Z0-9_]+$ && ${CLIENT_EXISTS} == '0' ]]; do
+		read -rp "Password : " -e user
+		CLIENT_EXISTS=$(grep -w $user /etc/shadowsocks-libev/akun.conf | wc -l)
+
+		if [[ ${CLIENT_EXISTS} == '1' ]]; then
+			echo ""
+			echo -e "Username ${RED}${user}${NC} Already On VPS Please Choose Another"
+			exit 1
+		fi
+	done
+read -p "Expired (Days) : " masaaktif
+hariini=`date -d "0 days" +"%Y-%m-%d"`
+exp=`date -d "$masaaktif days" +"%Y-%m-%d"`
+cat > /etc/shadowsocks-libev/$user-tls.json<<END
+{   
+    "server":"0.0.0.0",
+    "server_port":$tls,
+    "password":"$user",
+    "timeout":60,
+    "method":"aes-256-cfb",
+    "fast_open":true,
+    "no_delay":true,
+    "nameserver":"8.8.8.8",
+    "mode":"tcp_and_udp",
+    "plugin":"obfs-server",
+    "plugin_opts":"obfs=tls"
+}
+END
+cat > /etc/shadowsocks-libev/$user-http.json <<-END
+{
+    "server":"0.0.0.0",
+    "server_port":$http,
+    "password":"$user",
+    "timeout":60,
+    "method":"aes-256-cfb",
+    "fast_open":true,
+    "no_delay":true,
+    "nameserver":"8.8.8.8",
+    "mode":"tcp_and_udp",
+    "plugin":"obfs-server",
+    "plugin_opts":"obfs=http"
+}
+END
+chmod +x /etc/shadowsocks-libev/$user-tls.json
+chmod +x /etc/shadowsocks-libev/$user-http.json
+
+systemctl enable shadowsocks-libev-server@$user-tls.service
+systemctl start shadowsocks-libev-server@$user-tls.service
+systemctl enable shadowsocks-libev-server@$user-http.service
+systemctl start shadowsocks-libev-server@$user-http.service
+tmp1=$(echo -n "aes-256-cfb:${user}" | base64 -w0)
+tmp2=$(echo -n "aes-256-cfb:${user}" | base64 -w0)
+linkss1="ss://${tmp1}@${domain}:$tls"
+linkss2="ss://${tmp2}@${domain}:$http"
+echo -e "### $user $exp
+port_tls $tls
+port_http $http">>"/etc/shadowsocks-libev/akun.conf"
+service cron restart
+clear
+# Notifikasi Telegram
+TEKS=$(cat <<EOF
+<b>──────────────────────────</b>
+<b>&lt; ShadowSocks ACCOUNT &gt;    </b>
+<b>──────────────────────────</b>
+
+<b>Hostname:</b> <code>${domain}</code>
+<b>Wildcard:</b> <code>bug.com.${domain}</code>
+<b>Username:</b> <code>${user}</code>
+<b>ssl/tls :</b> <code>${tls}</code>
+<b>http    :</b> <code>${http}</code>
+<b>Password:</b> <code>${user}</code>
+<b>Method  :</b> <code>aes-256-cfb</code>
+<b>──────────────────────────</b>
+<b>Link TLS     :</b> 
+<code>${linkss1}</code>
+<b>──────────────────────────</b>
+<b>Link None    :</b> 
+<code>${linkss2}</code>
+<b>──────────────────────────</b>
+<b>Expired      :</b> <code>${exp}</code>
+<b>──────────────────────────</b>
+EOF
+)
+
+curl -s -X POST "https://api.telegram.org/bot$telegram_bot_token/sendMessage" \
+    -d "chat_id=$telegram_chatid" \
+    -d "parse_mode=HTML" \
+    --data-urlencode "text=$TEKS" > /dev/null
+
+clear
+kaizen_header " • SHADOWSOCKS ACCOUNT CREATED • "
+echo -e "Domain: $domain"
+echo -e "TLS: $tls"
+echo -e "HTTP: $http"
+echo -e "Password: $user"
+echo -e "Method: aes-256-cfb"
+echo -e "══════════════════════════"
+echo -e "Link TLS    : $linkss1"
+echo -e "══════════════════════════"
+echo -e "Link No TLS : $linkss2"
+echo -e "══════════════════════════"
+echo -e " Expired: $exp"
+echo -e "══════════════════════════"
+
+__KZN_ADDSS__
+chmod 0755 "$RERE/addss"
+bash -n "$RERE/addss"
+
+[[ -f "$RERE/delss" ]] && cp -a "$RERE/delss" "$BACKUP/rere/delss" || true
+cat > "$RERE/delss" <<'__KZN_DELSS__'
+#!/usr/bin/env bash
+source /usr/local/rere/kaizen-ui 2>/dev/null || true
+CONF=/etc/shadowsocks-libev/akun.conf
+clear; kaizen_header " • Delete Shadowsocks Account • "
+[[ -s "$CONF" ]] || { echo "No Shadowsocks account found."; exit 0; }
+mapfile -t rows < <(awk '/^### / {print $2 "|" $3}' "$CONF")
+((${#rows[@]})) || { echo "No Shadowsocks account found."; exit 0; }
+C=$(kaizen_table_colour); W=$(kaizen_text_colour); R=$(kaizen_reset); BG='\e[0;47;30m'
+uw=16; for row in "${rows[@]}"; do u=${row%%|*}; ((${#u}>uw))&&uw=${#u}; done
+a=$(kaizen_repeat_line '─' $((uw+2))); b=$(kaizen_repeat_line '─' 13)
+printf '%b┌%s┬%s┐%b\n' "$C" "$a" "$b" "$R"
+printf '%b│%b%b %-*s %b%b│%b%b %-11s %b%b│%b\n' "$C" "$R" "$BG" "$uw" Username "$R" "$C" "$R" "$BG" "Expire Date" "$R" "$C" "$R"
+printf '%b├%s┼%s┤%b\n' "$C" "$a" "$b" "$R"
+for row in "${rows[@]}"; do u=${row%%|*}; e=${row#*|}; printf '%b│%b %-*s %b│%b %-11s %b│%b\n' "$C" "$W" "$uw" "$u" "$C" "$W" "$e" "$C" "$R"; done
+printf '%b└%s┴%s┘%b\n' "$C" "$a" "$b" "$R"
+echo
+read -rp "Username to delete: " user
+line=$(awk -v u="$user" '$1=="###" && $2==u {print $2" "$3;exit}' "$CONF")
+[[ -n "$line" ]] || { echo "[ERROR] Account not found."; exit 1; }
+exp=${line#* }
+read -rp "Delete Shadowsocks account '$user'? (y/n): " yn
+[[ "$yn" =~ ^[Yy]$ ]] || { echo "Cancelled."; exit 0; }
+sed -i "/^### $user $exp$/,/^port_http /d" "$CONF"
+systemctl disable --now "shadowsocks-libev-server@$user-tls.service" "shadowsocks-libev-server@$user-http.service" >/dev/null 2>&1 || true
+rm -f "/etc/shadowsocks-libev/$user-tls.json" "/etc/shadowsocks-libev/$user-http.json"
+clear; kaizen_result_header "SHADOWSOCKS ACCOUNT DELETED"
+echo "Username : $user"
+echo "Expire   : $exp"
+echo "Status   : DELETED"
+
+__KZN_DELSS__
+chmod 0755 "$RERE/delss"
+bash -n "$RERE/delss"
+
+[[ -f "$RERE/renewss" ]] && cp -a "$RERE/renewss" "$BACKUP/rere/renewss" || true
+cat > "$RERE/renewss" <<'__KZN_RENEWSS__'
+#!/usr/bin/env bash
+source /usr/local/rere/kaizen-ui 2>/dev/null || true
+CONF=/etc/shadowsocks-libev/akun.conf
+clear; kaizen_header " • Extend Shadowsocks Account • "
+[[ -s "$CONF" ]] || { echo "No Shadowsocks account found."; exit 0; }
+mapfile -t rows < <(awk '/^### / {print $2 "|" $3}' "$CONF")
+((${#rows[@]})) || { echo "No Shadowsocks account found."; exit 0; }
+C=$(kaizen_table_colour); W=$(kaizen_text_colour); R=$(kaizen_reset); BG='\e[0;47;30m'
+uw=16; for row in "${rows[@]}"; do u=${row%%|*}; ((${#u}>uw))&&uw=${#u}; done
+a=$(kaizen_repeat_line '─' $((uw+2))); b=$(kaizen_repeat_line '─' 13)
+printf '%b┌%s┬%s┐%b\n' "$C" "$a" "$b" "$R"
+printf '%b│%b%b %-*s %b%b│%b%b %-11s %b%b│%b\n' "$C" "$R" "$BG" "$uw" Username "$R" "$C" "$R" "$BG" "Expire Date" "$R" "$C" "$R"
+printf '%b├%s┼%s┤%b\n' "$C" "$a" "$b" "$R"
+for row in "${rows[@]}"; do u=${row%%|*}; e=${row#*|}; printf '%b│%b %-*s %b│%b %-11s %b│%b\n' "$C" "$W" "$uw" "$u" "$C" "$W" "$e" "$C" "$R"; done
+printf '%b└%s┴%s┘%b\n' "$C" "$a" "$b" "$R"
+echo
+read -rp "Username to extend: " user
+old=$(awk -v u="$user" '$1=="###" && $2==u {print $3;exit}' "$CONF")
+[[ -n "$old" ]] || { echo "[ERROR] Account not found."; exit 1; }
+read -rp "Extend (days): " days
+[[ "$days" =~ ^[0-9]+$ && "$days" -gt 0 ]] || { echo "[ERROR] Invalid days."; exit 1; }
+now=$(date +%F); old_epoch=$(date -d "$old" +%s); now_epoch=$(date -d "$now" +%s)
+((old_epoch>now_epoch)) && base=$old_epoch || base=$now_epoch
+new=$(date -d "@$((base+days*86400))" +%F)
+sed -i "s/^### $user $old$/### $user $new/" "$CONF"
+clear; kaizen_result_header "SHADOWSOCKS ACCOUNT EXTENDED"
+echo "Username    : $user"
+echo "Previous    : $old"
+echo "New Expiry  : $new"
+echo "Status      : SUCCESS"
+
+__KZN_RENEWSS__
+chmod 0755 "$RERE/renewss"
+bash -n "$RERE/renewss"
+
+[[ -f "$RERE/cekss" ]] && cp -a "$RERE/cekss" "$BACKUP/rere/cekss" || true
+cat > "$RERE/cekss" <<'__KZN_CEKSS__'
+#!/usr/bin/env bash
+source /usr/local/rere/kaizen-ui 2>/dev/null || true
+CONF=/etc/shadowsocks-libev/akun.conf
+clear; kaizen_header " • Check Shadowsocks Login • "
+[[ -s "$CONF" ]] || { echo "No Shadowsocks account found."; exit 0; }
+W=$(kaizen_text_colour); G=$(kaizen_green); R=$(kaizen_reset)
+online=0
+while read -r user exp; do
+ tls=$(awk -v u="$user" '$1=="###"&&$2==u{f=1;next} f&&$1=="port_tls"{print $2;exit}' "$CONF")
+ http=$(awk -v u="$user" '$1=="###"&&$2==u{f=1;next} f&&$1=="port_http"{print $2;exit}' "$CONF")
+ count=$(ss -tnp 2>/dev/null | grep ESTAB | grep -cE ":(${tls}|${http}) " || true)
+ ((count>0)) && { status=ONLINE; online=$((online+1)); colour="$G"; } || { status=OFFLINE; colour="$W"; }
+ printf '%bUser   : %s%b\n' "$W" "$user" "$R"
+ printf '%bStatus : %b%s%b\n' "$W" "$colour" "$status" "$R"
+ printf '%bLogin  : %s connection(s)%b\n\n' "$W" "$count" "$R"
+done < <(awk '/^### /{print $2,$3}' "$CONF")
+printf '%bTotal Online : %s%b\n' "$(kaizen_yellow)" "$online" "$R"
+read -rp 'Press Enter to continue...' _
+
+__KZN_CEKSS__
+chmod 0755 "$RERE/cekss"
+bash -n "$RERE/cekss"
+
+[[ -f "$RERE/menu-ss" ]] && cp -a "$RERE/menu-ss" "$BACKUP/rere/menu-ss" || true
+cat > "$RERE/menu-ss" <<'__KZN_MENU_SS__'
+#!/usr/bin/env bash
+RED='\e[0;31m'; CYAN='\e[0;36m'; WHITE='\e[0;97m'; plain='\e[0m'; bgPutih='\e[0;47;30m'; keatas="${CYAN}│${plain}"
+cmd(){ printf '  '; local i; for i in {52..57} {57..52}; do printf "\e[38;5;${i}m────\e[0m"; done; echo; }
+invalid(){ echo; echo -e "${RED}Invalid option, please try again!${plain}"; sleep 1; }
+while true; do
+  clear; echo
+  echo -e "${CYAN}┌─────────────────────────────────────────────────┐${plain}"
+  echo -e "${keatas}${bgPutih}              • MENU SHADOWSOCKS •              ${plain}${keatas}"
+  echo -e "${CYAN}└─────────────────────────────────────────────────┘${plain}"
+  echo -e "  ${CYAN}[01]${plain} ${WHITE}Create Shadowsocks Account${plain}"
+  echo -e "  ${CYAN}[02]${plain} ${WHITE}Delete Shadowsocks Account${plain}"
+  echo -e "  ${CYAN}[03]${plain} ${WHITE}Extend Shadowsocks Account${plain}"
+  echo -e "  ${CYAN}[04]${plain} ${WHITE}Check Shadowsocks Login${plain}"
+  echo -e "  ${CYAN}[05]${plain} ${WHITE}Check Shadowsocks Expired Log${plain}"
+  echo -e "  ${CYAN}[06]${plain} ${WHITE}Back to Menu${plain}"
+  cmd
+  echo -e "  ${CYAN}[ x]${plain} ${WHITE}Exit${plain}"
+  cmd; echo
+  read -rp " $(echo -e "${WHITE}Please select an option [01-06 or x]:${plain} ")" opt
+  case "$opt" in
+    1|01) addss ;;
+    2|02) delss ;;
+    3|03) renewss ;;
+    4|04) cekss ;;
+    5|05) clear; kaizen_header " • Shadowsocks Expired Log • "; cat /var/log/expired-ss.log 2>/dev/null || echo "No expired log found."; read -rp 'Press Enter to continue...' _ ;;
+    6|06) exec menu ;;
+    x|X) clear; exit 0 ;;
+    *) invalid; continue ;;
+  esac
+done
+
+__KZN_MENU_SS__
+chmod 0755 "$RERE/menu-ss"
+bash -n "$RERE/menu-ss"
+
+[[ -f "$RERE/menu-wgcf" ]] && cp -a "$RERE/menu-wgcf" "$BACKUP/rere/menu-wgcf" || true
+cat > "$RERE/menu-wgcf" <<'__KZN_MENU_WGCF__'
+#!/usr/bin/env bash
+source /usr/local/rere/kaizen-ui 2>/dev/null || true
+RED='\e[0;31m'; GREEN='\e[0;32m'; CYAN='\e[0;36m'; WHITE='\e[0;97m'; plain='\e[0m'
+DB=/etc/kaizensc/database/wireguard/accounts.tsv
+WEB=/var/www/html/fn
+mkdir -p "$(dirname "$DB")" "$WEB"; touch "$DB"
+[[ -x /usr/bin/warp ]] || { wget -qO /usr/bin/warp https://raw.githubusercontent.com/rany2/warp.sh/master/warp.sh && chmod +x /usr/bin/warp; }
+domain=$(cat /etc/xray/domain 2>/dev/null || hostname -f)
+header(){ clear; kaizen_header " • $1 • "; }
+cmd(){ printf '  '; for i in {52..57} {57..52}; do printf "\e[38;5;${i}m────\e[0m"; done; echo; }
+valid_user(){ [[ "$1" =~ ^[A-Za-z0-9_.-]+$ ]]; }
+list_accounts(){
+ local title="${1:-List Wireguard Account}" count=0 u type exp file uw=16
+ header "$title"
+ while IFS='|' read -r u type exp file; do [[ -n "$u" ]] || continue; ((${#u}>uw))&&uw=${#u}; done < "$DB"
+ C=$(kaizen_table_colour); W=$(kaizen_text_colour); R=$(kaizen_reset); BG='\e[0;47;30m'
+ a=$(kaizen_repeat_line '─' $((uw+2))); b=$(kaizen_repeat_line '─' 8); d=$(kaizen_repeat_line '─' 13)
+ printf '%b┌%s┬%s┬%s┐%b\n' "$C" "$a" "$b" "$d" "$R"
+ printf '%b│%b%b %-*s %b%b│%b%b %-6s %b%b│%b%b %-11s %b%b│%b\n' "$C" "$R" "$BG" "$uw" Username "$R" "$C" "$R" "$BG" Type "$R" "$C" "$R" "$BG" "Expire Date" "$R" "$C" "$R"
+ printf '%b├%s┼%s┼%s┤%b\n' "$C" "$a" "$b" "$d" "$R"
+ while IFS='|' read -r u type exp file; do [[ -n "$u" ]] || continue; count=$((count+1)); printf '%b│%b %-*s %b│%b %-6s %b│%b %-11s %b│%b\n' "$C" "$W" "$uw" "$u" "$C" "$W" "$type" "$C" "$W" "$exp" "$C" "$R"; done < "$DB"
+ printf '%b└%s┴%s┴%s┘%b\n' "$C" "$a" "$b" "$d" "$R"
+ LIST_COUNT=$count
+}
+create_account(){
+ local type="$1" flag username days exp filename url
+ header "CREATE WIREGUARD $type ACCOUNT"
+ read -rp "Username: " username; valid_user "$username" || { echo -e "${RED}Invalid username.${plain}"; sleep 1; return; }
+ grep -q "^${username}|" "$DB" && { echo -e "${RED}Username already exists.${plain}"; sleep 1; return; }
+ read -rp "Expired (Days): " days; [[ "$days" =~ ^[0-9]+$ && "$days" -gt 0 ]] || { echo -e "${RED}Invalid days.${plain}"; sleep 1; return; }
+ exp=$(date -d "+$days days" +%F); filename="wg-${username}-${type,,}.conf"; flag=-4; [[ "$type" == IPv6 ]] && flag=-6
+ if ! warp "$flag" > "$WEB/$filename"; then echo -e "${RED}Failed to generate Wireguard config.${plain}"; rm -f "$WEB/$filename"; sleep 2; return; fi
+ printf '%s|%s|%s|%s\n' "$username" "$type" "$exp" "$filename" >> "$DB"
+ url="https://$domain/fn/$filename"
+ header "WIREGUARD ACCOUNT CREATED"
+ echo "Username    : $username"; echo "Type        : $type"; echo "Expire Date : $exp"; echo "Download    : $url"
+ read -rp 'Press Enter to continue...' _
+}
+delete_account(){
+ list_accounts "DELETE WIREGUARD ACCOUNT"; ((LIST_COUNT>0)) || { read -rp 'Press Enter...' _; return; }
+ read -rp "Username to delete: " user; row=$(grep -F "${user}|" "$DB"|head -1); [[ -n "$row" ]] || { echo "[ERROR] Account not found."; sleep 1; return; }
+ read -rp "Delete Wireguard account '$user'? (y/n): " yn; [[ "$yn" =~ ^[Yy]$ ]] || return
+ file=$(echo "$row"|cut -d'|' -f4); grep -v -F "${user}|" "$DB" > "$DB.tmp" && mv "$DB.tmp" "$DB"; rm -f "$WEB/$file"
+ header "WIREGUARD ACCOUNT DELETED"; echo "Account : $user"; echo "Status  : DELETED"; read -rp 'Press Enter...' _
+}
+extend_account(){
+ list_accounts "EXTEND WIREGUARD ACCOUNT"; ((LIST_COUNT>0)) || { read -rp 'Press Enter...' _; return; }
+ read -rp "Username to extend: " user; row=$(grep -F "${user}|" "$DB"|head -1); [[ -n "$row" ]] || { echo "[ERROR] Account not found."; sleep 1; return; }
+ old=$(echo "$row"|cut -d'|' -f3); read -rp "Extend (days): " days; [[ "$days" =~ ^[0-9]+$ && "$days" -gt 0 ]] || return
+ now=$(date +%s); oe=$(date -d "$old" +%s); ((oe>now))&&base=$oe||base=$now; new=$(date -d "@$((base+days*86400))" +%F)
+ awk -F'|' -v OFS='|' -v u="$user" -v n="$new" '$1==u{$3=n}1' "$DB" > "$DB.tmp" && mv "$DB.tmp" "$DB"
+ header "WIREGUARD ACCOUNT EXTENDED"; echo "Account    : $user"; echo "New Expiry : $new"; read -rp 'Press Enter...' _
+}
+check_config(){
+ list_accounts "CHECK WIREGUARD CONFIG"; ((LIST_COUNT>0)) || { read -rp 'Press Enter...' _; return; }
+ read -rp "Username: " user; row=$(grep -F "${user}|" "$DB"|head -1); [[ -n "$row" ]] || { echo "[ERROR] Account not found."; sleep 1; return; }
+ IFS='|' read -r u type exp file <<< "$row"; header "WIREGUARD ACCOUNT CONFIG"
+ echo "Username    : $u"; echo "Type        : $type"; echo "Expire Date : $exp"; echo "Download    : https://$domain/fn/$file"; echo; cat "$WEB/$file" 2>/dev/null || true
+ read -rp 'Press Enter to continue...' _
+}
+while true; do
+ header "MENU WIREGUARD"
+ echo -e "  ${CYAN}[01]${plain} ${WHITE}Create Account with IPv4${plain}"
+ echo -e "  ${CYAN}[02]${plain} ${WHITE}Create Account with IPv6${plain}"
+ echo -e "  ${CYAN}[03]${plain} ${WHITE}List Wireguard Account${plain}"
+ echo -e "  ${CYAN}[04]${plain} ${WHITE}Delete Wireguard Account${plain}"
+ echo -e "  ${CYAN}[05]${plain} ${WHITE}Extend Wireguard Account${plain}"
+ echo -e "  ${CYAN}[06]${plain} ${WHITE}Check Wireguard Config${plain}"
+ echo -e "  ${CYAN}[07]${plain} ${WHITE}Back to Menu${plain}"
+ cmd; echo -e "  ${CYAN}[ x]${plain} ${WHITE}Exit${plain}"; cmd
+ read -rp "Please select an option [01-07 or x]: " opt
+ case "$opt" in 1|01) create_account IPv4;;2|02) create_account IPv6;;3|03) list_accounts; echo; echo "Total User : $LIST_COUNT"; read -rp 'Press Enter...' _;;4|04) delete_account;;5|05) extend_account;;6|06) check_config;;7|07) exec menu;;x|X) exit 0;;*) sleep 1;;esac
+done
+
+__KZN_MENU_WGCF__
+chmod 0755 "$RERE/menu-wgcf"
+bash -n "$RERE/menu-wgcf"
+
+[[ -f "$RERE/xp-wireguard" ]] && cp -a "$RERE/xp-wireguard" "$BACKUP/rere/xp-wireguard" || true
+cat > "$RERE/xp-wireguard" <<'__KZN_XP_WIREGUARD__'
+#!/usr/bin/env bash
+DB=/etc/kaizensc/database/wireguard/accounts.tsv
+WEB=/var/www/html/fn
+[[ -s "$DB" ]] || exit 0
+today=$(date +%s); tmp=$(mktemp)
+while IFS='|' read -r u type exp file; do
+ [[ -n "$u" ]] || continue
+ ee=$(date -d "$exp 23:59:59" +%s 2>/dev/null || echo 0)
+ if ((ee>today)); then printf '%s|%s|%s|%s\n' "$u" "$type" "$exp" "$file" >> "$tmp"; else rm -f "$WEB/$file"; fi
+done < "$DB"
+mv "$tmp" "$DB"
+
+__KZN_XP_WIREGUARD__
+chmod 0755 "$RERE/xp-wireguard"
+bash -n "$RERE/xp-wireguard"
+
+[[ -f "$RERE/menu-udp-zivpn" ]] && cp -a "$RERE/menu-udp-zivpn" "$BACKUP/rere/menu-udp-zivpn" || true
+cat > "$RERE/menu-udp-zivpn" <<'__KZN_MENU_UDP_ZIVPN__'
+#!/usr/bin/env bash
+source /usr/local/rere/kaizen-ui 2>/dev/null || true
+RED='\e[0;31m'; GREEN='\e[0;32m'; CYAN='\e[0;36m'; WHITE='\e[0;97m'; plain='\e[0m'
+CONFIG=/etc/zivpn/config.json; SERVICE=/etc/systemd/system/zivpn.service; BIN=/usr/local/bin/zivpn; DB=/etc/zivpn/password.json
+header(){ clear; kaizen_header " • $1 • "; }
+cmd(){ printf '  '; for i in {52..57} {57..52}; do printf "\e[38;5;${i}m────\e[0m"; done; echo; }
+installed(){ [[ -x "$BIN" && -f "$CONFIG" && -f "$SERVICE" ]]; }
+init_db(){ mkdir -p /etc/zivpn; [[ -f "$DB" ]] || echo '[]' > "$DB"; }
+passwords(){ jq -r '.auth.config[]?' "$CONFIG" 2>/dev/null; }
+get_port(){ jq -r '.listen // ""' "$CONFIG" 2>/dev/null | grep -oE '[0-9]+'|head -1; }
+get_obfs(){ jq -r '.obfs // "-"' "$CONFIG" 2>/dev/null; }
+update_passwords(){
+ local json; json=$(printf '%s\n' "$@" | jq -R . | jq -s .)
+ jq --argjson a "$json" '.auth.config=$a' "$CONFIG" > "$CONFIG.tmp" && mv "$CONFIG.tmp" "$CONFIG"
+ systemctl restart zivpn
+}
+pw_exp(){ init_db; jq -r --arg p "$1" '.[]|select(.password==$p)|.expired' "$DB"|head -1; }
+list_table(){
+ local title="$1" count=0 p exp pw=16 ew=11
+ header "$title"; mapfile -t arr < <(passwords)
+ for p in "${arr[@]}"; do exp=$(pw_exp "$p"); [[ -n "$exp" && "$exp" != null ]] || exp="-"; ((${#p}>pw))&&pw=${#p}; ((${#exp}>ew))&&ew=${#exp}; done
+ C=$(kaizen_table_colour); W=$(kaizen_text_colour); R=$(kaizen_reset); BG='\e[0;47;30m'; a=$(kaizen_repeat_line '─' $((pw+2))); b=$(kaizen_repeat_line '─' $((ew+2)))
+ printf '%b┌%s┬%s┐%b\n' "$C" "$a" "$b" "$R"; printf '%b│%b%b %-*s %b%b│%b%b %-*s %b%b│%b\n' "$C" "$R" "$BG" "$pw" Password "$R" "$C" "$R" "$BG" "$ew" "Expire Date" "$R" "$C" "$R"; printf '%b├%s┼%s┤%b\n' "$C" "$a" "$b" "$R"
+ for p in "${arr[@]}"; do exp=$(pw_exp "$p"); [[ -n "$exp" && "$exp" != null ]] || exp="-"; count=$((count+1)); printf '%b│%b %-*s %b│%b %-*s %b│%b\n' "$C" "$W" "$pw" "$p" "$C" "$W" "$ew" "$exp" "$C" "$R"; done
+ printf '%b└%s┴%s┘%b\n' "$C" "$a" "$b" "$R"; ZCOUNT=$count
+}
+install_z(){
+ header "INSTALL / UPDATE ZIVPN"
+ wget -qO "$BIN" https://github.com/zahidbd2/udp-zivpn/releases/download/udp-zivpn_1.4.9/udp-zivpn-linux-amd64 || { echo "Download failed."; read -rp 'Press Enter...' _; return; }
+ chmod +x "$BIN"; mkdir -p /etc/zivpn; init_db
+ port=$(get_port); [[ "$port" =~ ^[0-9]+$ ]] || port=5667
+ [[ -f /etc/zivpn/zivpn.key ]] || openssl req -new -newkey rsa:4096 -days 365 -nodes -x509 -subj "/CN=zivpn" -keyout /etc/zivpn/zivpn.key -out /etc/zivpn/zivpn.crt >/dev/null 2>&1
+ [[ -f "$CONFIG" ]] || cat > "$CONFIG" <<EOF
+{"listen":":$port","cert":"/etc/zivpn/zivpn.crt","key":"/etc/zivpn/zivpn.key","obfs":"zivpn","auth":{"mode":"passwords","config":["zi"]}}
+EOF
+ cat > "$SERVICE" <<EOF
+[Unit]
+Description=ZiVPN UDP Server
+After=network.target
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/etc/zivpn
+ExecStart=$BIN server -c $CONFIG
+Restart=always
+RestartSec=3
+[Install]
+WantedBy=multi-user.target
+EOF
+ systemctl daemon-reload; systemctl enable --now zivpn
+ header "ZIVPN INSTALLED"; echo "Status : SUCCESS"; echo "Port   : $(get_port)"; read -rp 'Press Enter...' _
+}
+add_pw(){
+ installed || { header "ADD ZIVPN PASSWORD"; echo "ZIVPN is not installed."; read -rp 'Press Enter...' _; return; }
+ header "ADD ZIVPN PASSWORD"; read -rp "Password: " pw; [[ -n "$pw" ]] || return
+ passwords | grep -Fxq "$pw" && { echo "Password already exists."; sleep 1; return; }
+ read -rp "Expired (Days): " days; [[ "$days" =~ ^[0-9]+$ && "$days" -gt 0 ]] || { echo "Invalid days."; sleep 1; return; }
+ exp=$(date -d "+$days days" +%F); mapfile -t arr < <(passwords); arr+=("$pw"); update_passwords "${arr[@]}"; init_db
+ jq --arg p "$pw" --arg e "$exp" 'del(.[]|select(.password==$p)) + [{"password":$p,"expired":$e}]' "$DB" > "$DB.tmp" && mv "$DB.tmp" "$DB"
+ header "ZIVPN PASSWORD CREATED"; echo "Password    : $pw"; echo "Expire Date : $exp"; echo "Status      : SUCCESS"; read -rp 'Press Enter...' _
+}
+delete_pw(){
+ installed || { header "DELETE ZIVPN PASSWORD"; echo "ZIVPN is not installed."; read -rp 'Press Enter...' _; return; }
+ list_table "DELETE ZIVPN PASSWORD"; ((ZCOUNT)) || { read -rp 'Press Enter...' _; return; }; read -rp "Password to delete: " pw
+ mapfile -t arr < <(passwords); found=0; new=(); for x in "${arr[@]}"; do [[ "$x" == "$pw" ]] && { found=1; continue; }; new+=("$x"); done; ((found)) || { echo "Password not found."; sleep 1; return; }
+ ((${#new[@]})) || { echo "At least one password must remain."; sleep 1; return; }
+ read -rp "Delete password '$pw'? (y/n): " yn; [[ "$yn" =~ ^[Yy]$ ]] || return
+ update_passwords "${new[@]}"; jq --arg p "$pw" 'del(.[]|select(.password==$p))' "$DB" > "$DB.tmp" && mv "$DB.tmp" "$DB"
+ header "ZIVPN PASSWORD DELETED"; echo "Password : $pw"; echo "Status   : DELETED"; read -rp 'Press Enter...' _
+}
+status_z(){
+ header "ZIVPN STATUS"; if installed; then systemctl is-active --quiet zivpn && st=ONLINE || st=OFFLINE; else st=NOT-INSTALLED; fi
+ [[ "$st" == ONLINE ]] && c=$(kaizen_green) || c=$(kaizen_red); W=$(kaizen_text_colour); R=$(kaizen_reset)
+ printf '%bStatus : %b%s%b\n' "$W" "$c" "$st" "$R"; echo "Port   : $(get_port 2>/dev/null || echo -)"; echo "Obfs   : $(get_obfs 2>/dev/null || echo -)"; read -rp 'Press Enter...' _
+}
+change_obfs(){ installed || return; header "CHANGE ZIVPN OBFS"; echo "Current : $(get_obfs)"; read -rp "New Obfs: " v; [[ -n "$v" ]] || return; jq --arg v "$v" '.obfs=$v' "$CONFIG" > "$CONFIG.tmp"&&mv "$CONFIG.tmp" "$CONFIG"; systemctl restart zivpn; header "ZIVPN OBFS UPDATED"; echo "Obfs : $v"; echo "Status : SUCCESS"; read -rp 'Press Enter...' _; }
+change_port(){ installed || return; header "CHANGE ZIVPN PORT"; echo "Current : $(get_port)"; read -rp "New Port: " v; [[ "$v" =~ ^[0-9]+$ && $v -ge 1 && $v -le 65535 ]] || return; jq --arg v ":$v" '.listen=$v' "$CONFIG" > "$CONFIG.tmp"&&mv "$CONFIG.tmp" "$CONFIG"; systemctl restart zivpn; header "ZIVPN PORT UPDATED"; echo "Port : $v"; echo "Status : SUCCESS"; read -rp 'Press Enter...' _; }
+list_cfg(){ installed || return; list_table "LIST ZIVPN PASSWORD"; echo; echo "Total User : $ZCOUNT"; read -rp 'Press Enter...' _; }
+uninstall_z(){ header "UNINSTALL ZIVPN"; read -rp "Uninstall ZIVPN? (y/n): " yn; [[ "$yn" =~ ^[Yy]$ ]] || return; systemctl disable --now zivpn >/dev/null 2>&1||true; rm -f "$SERVICE" "$BIN"; systemctl daemon-reload; header "ZIVPN UNINSTALLED"; echo "Status : SUCCESS"; read -rp 'Press Enter...' _; }
+while true; do
+ header "MENU UDP ZIVPN"
+ echo -e "  ${CYAN}[01]${plain} ${WHITE}Install / Update ZIVPN${plain}"
+ echo -e "  ${CYAN}[02]${plain} ${WHITE}Add Password${plain}"
+ echo -e "  ${CYAN}[03]${plain} ${WHITE}Delete Password${plain}"
+ echo -e "  ${CYAN}[04]${plain} ${WHITE}Uninstall ZIVPN${plain}"
+ echo -e "  ${CYAN}[05]${plain} ${WHITE}Check Status${plain}"
+ echo -e "  ${CYAN}[06]${plain} ${WHITE}Change Obfs${plain}"
+ echo -e "  ${CYAN}[07]${plain} ${WHITE}Change Port${plain}"
+ echo -e "  ${CYAN}[08]${plain} ${WHITE}List Config & Password${plain}"
+ echo -e "  ${CYAN}[09]${plain} ${WHITE}Back to Menu${plain}"
+ cmd; echo -e "  ${CYAN}[ x]${plain} ${WHITE}Exit${plain}"; cmd
+ read -rp "Please select an option [01-09 or x]: " opt
+ case "$opt" in 1|01) install_z;;2|02) add_pw;;3|03) delete_pw;;4|04) uninstall_z;;5|05) status_z;;6|06) change_obfs;;7|07) change_port;;8|08) list_cfg;;9|09) exec menu;;x|X) exit 0;;*) sleep 1;;esac
+done
+
+__KZN_MENU_UDP_ZIVPN__
+chmod 0755 "$RERE/menu-udp-zivpn"
+bash -n "$RERE/menu-udp-zivpn"
+
+[[ -f "$RERE/menu-udp" ]] && cp -a "$RERE/menu-udp" "$BACKUP/rere/menu-udp" || true
+cat > "$RERE/menu-udp" <<'__KZN_MENU_UDP__'
+#!/usr/bin/env bash
+source /usr/local/rere/kaizen-ui 2>/dev/null || true
+RED='\e[0;31m'; CYAN='\e[0;36m'; WHITE='\e[0;97m'; plain='\e[0m'
+cmd(){ printf '  '; local i; for i in {52..57} {57..52}; do printf "\e[38;5;${i}m────\e[0m"; done; echo; }
+while true; do
+ clear; echo; kaizen_header " • EXTRA PROTOCOL • "
+ echo -e "  ${CYAN}[01]${plain} ${WHITE}UDP Custom${plain}"
+ echo -e "  ${CYAN}[02]${plain} ${WHITE}UDP Request${plain}"
+ echo -e "  ${CYAN}[03]${plain} ${WHITE}Hysteria 1${plain}"
+ echo -e "  ${CYAN}[04]${plain} ${WHITE}Hysteria 2${plain}"
+ echo -e "  ${CYAN}[05]${plain} ${WHITE}SlowDNS${plain}"
+ echo -e "  ${CYAN}[06]${plain} ${WHITE}SlowUDP${plain}"
+ echo -e "  ${CYAN}[07]${plain} ${WHITE}FastDNS / DNSTT${plain}"
+ echo -e "  ${CYAN}[08]${plain} ${WHITE}Back to Menu${plain}"
+ cmd; echo -e "  ${CYAN}[ x]${plain} ${WHITE}Exit${plain}"; cmd; echo
+ read -rp "Please select an option [01-08 or x]: " opw
+ case "$opw" in
+  1|01) menu-udp-custom;; 2|02) menu-udp-request;;
+  3|03) clear; bash <(curl -fsSL https://raw.githubusercontent.com/evozi/hysteria-install/main/hy1/hysteria1.sh);;
+  4|04) clear; bash <(curl -fsSL https://raw.githubusercontent.com/evozi/hysteria-install/main/hy2/hysteria2.sh);;
+  5|05) slowdns;; 6|06) clear; bash <(curl -fsSL https://raw.githubusercontent.com/evozi/hysteria-install/main/slowudp/slowudp.sh);;
+  7|07) menu-dnstt;; 8|08) exec menu;; x|X) clear; exit 0;;
+  *) echo -e "${RED}Invalid option.${plain}"; sleep 1;;
+ esac
+done
+
+__KZN_MENU_UDP__
+chmod 0755 "$RERE/menu-udp"
+bash -n "$RERE/menu-udp"
+
+[[ -f "$RERE/menu-udp-custom" ]] && cp -a "$RERE/menu-udp-custom" "$BACKUP/rere/menu-udp-custom" || true
+cat > "$RERE/menu-udp-custom" <<'__KZN_MENU_UDP_CUSTOM__'
+#!/usr/bin/env bash
+source /usr/local/rere/kaizen-ui 2>/dev/null || true
+RED='\e[0;31m'; GREEN='\e[0;32m'; CYAN='\e[0;36m'; WHITE='\e[0;97m'; plain='\e[0m'
+header(){ clear; kaizen_header " • $1 • "; }
+result(){ header "$1"; shift; printf '%s\n' "$@"; echo; read -rp 'Press Enter to continue...' _; }
+status_now(){ systemctl is-active --quiet udp-custom && echo -e "${GREEN}ON${plain}" || echo -e "${RED}OFF${plain}"; }
+
+enable_s(){ systemctl daemon-reload; systemctl enable --now udp-custom; result "UDP CUSTOM" "Status : ENABLED"; }
+disable_s(){ systemctl disable --now udp-custom >/dev/null 2>&1 || true; result "UDP CUSTOM" "Status : DISABLED"; }
+restart_s(){ systemctl daemon-reload; systemctl restart udp-custom; result "UDP CUSTOM" "Status : RESTARTED"; }
+change_port(){
+ header "CHANGE UDP CUSTOM PORT"
+ read -rp "New Port: " port
+ [[ "$port" =~ ^[0-9]+$ && $port -ge 1 && $port -le 65535 ]] || { echo -e "${RED}Invalid port.${plain}"; sleep 1; return; }
+ mkdir -p /etc/kaizensc/udp-custom
+ cat > /etc/kaizensc/udp-custom/config.json <<EOF
+{
+  "listen": ":${port}",
+  "stream_buffer": 33554432,
+  "receive_buffer": 83886080,
+  "auth": {"mode":"passwords"}
+}
+EOF
+ systemctl restart udp-custom; result "UDP CUSTOM PORT UPDATED" "Port : $port" "Status : SUCCESS"
+}
+exclude_port(){
+ header "EXCLUDE UDP CUSTOM PORT"
+ echo "Example: 7100,7200,7300"
+ read -rp "Exclude Port(s): " ports
+ [[ -n "$ports" ]] || return
+ local exec
+ exec=$(systemctl cat udp-custom 2>/dev/null | sed -n 's/^ExecStart=//p' | head -1)
+ [[ -n "$exec" ]] || { echo -e "${RED}Service ExecStart not found.${plain}"; sleep 2; return; }
+ exec=$(echo "$exec" | sed -E 's/[[:space:]]+--exclude[= ]+[^ ]+//g')
+ mkdir -p /etc/systemd/system/udp-custom.service.d
+ cat > /etc/systemd/system/udp-custom.service.d/override.conf <<EOF
+[Service]
+ExecStart=
+ExecStart=$exec --exclude $ports
+EOF
+ systemctl daemon-reload; systemctl restart udp-custom; result "UDP CUSTOM EXCLUDE PORT UPDATED" "Exclude : $ports" "Status : SUCCESS"
+}
+while true; do
+ header "UDP CUSTOM"
+ echo -e "  ${WHITE}Status : $(status_now)${plain}"; echo
+ offset=0
+ base=$((offset+1))
+ echo -e "  ${CYAN}[$(printf '%02d' $base)]${plain} ${WHITE}Enable${plain}"
+ echo -e "  ${CYAN}[$(printf '%02d' $((base+1)))]${plain} ${WHITE}Disable${plain}"
+ echo -e "  ${CYAN}[$(printf '%02d' $((base+2)))]${plain} ${WHITE}Restart${plain}"
+ echo -e "  ${CYAN}[$(printf '%02d' $((base+3)))]${plain} ${WHITE}Change Port${plain}"
+ echo -e "  ${CYAN}[$(printf '%02d' $((base+4)))]${plain} ${WHITE}Exclude Port${plain}"
+ echo -e "  ${CYAN}[00]${plain} ${WHITE}Back to Extra Protocol${plain}"
+ read -rp "Select option: " opt
+ case "$opt" in
+ 1|01) enable_s;; 2|02) disable_s;; 3|03) restart_s;; 4|04) change_port;; 5|05) exclude_port;;
+ 0|00) exec menu-udp;; x|X) exit 0;; *) echo -e "${RED}Invalid option.${plain}"; sleep 1;; esac
+done
+
+__KZN_MENU_UDP_CUSTOM__
+chmod 0755 "$RERE/menu-udp-custom"
+bash -n "$RERE/menu-udp-custom"
+
+[[ -f "$RERE/menu-udp-request" ]] && cp -a "$RERE/menu-udp-request" "$BACKUP/rere/menu-udp-request" || true
+cat > "$RERE/menu-udp-request" <<'__KZN_MENU_UDP_REQUEST__'
+#!/usr/bin/env bash
+source /usr/local/rere/kaizen-ui 2>/dev/null || true
+RED='\e[0;31m'; GREEN='\e[0;32m'; CYAN='\e[0;36m'; WHITE='\e[0;97m'; plain='\e[0m'
+header(){ clear; kaizen_header " • $1 • "; }
+result(){ header "$1"; shift; printf '%s\n' "$@"; echo; read -rp 'Press Enter to continue...' _; }
+status_now(){ systemctl is-active --quiet udp-request && echo -e "${GREEN}ON${plain}" || echo -e "${RED}OFF${plain}"; }
+
+install_service(){
+ header "INSTALL UDP REQUEST"
+ local ip_nat interface public_ip
+ ip_nat=$(ip -4 addr | awk '/inet / && $2 !~ /^127/ {sub(/\/.*/,"",$2);print $2;exit}')
+ interface=$(ip -4 route show default | awk '{print $5;exit}')
+ public_ip=$(cat /root/.ip 2>/dev/null || echo "$ip_nat")
+ cat > /etc/systemd/system/udp-request.service <<EOF
+[Unit]
+Description=UDP Request Service
+After=network.target
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/etc/kaizensc/udp-request
+ExecStart=/etc/kaizensc/udp-request/udp-request -ip=$public_ip -net=$interface -exclude=7100,7200,7300,7400,7500,7600,7700,7800,7900,5300,5053,53,5353 -mode=system
+Restart=always
+RestartSec=3s
+[Install]
+WantedBy=multi-user.target
+EOF
+ systemctl daemon-reload; systemctl enable --now udp-request
+ result "UDP REQUEST INSTALLED" "Status : SUCCESS"
+}
+
+enable_s(){ systemctl daemon-reload; systemctl enable --now udp-request; result "UDP REQUEST" "Status : ENABLED"; }
+disable_s(){ systemctl disable --now udp-request >/dev/null 2>&1 || true; result "UDP REQUEST" "Status : DISABLED"; }
+restart_s(){ systemctl daemon-reload; systemctl restart udp-request; result "UDP REQUEST" "Status : RESTARTED"; }
+change_port(){
+ header "CHANGE UDP REQUEST PORT"
+ read -rp "New Port: " port
+ [[ "$port" =~ ^[0-9]+$ && $port -ge 1 && $port -le 65535 ]] || { echo -e "${RED}Invalid port.${plain}"; sleep 1; return; }
+ mkdir -p /etc/kaizensc/udp-request
+ cat > /etc/kaizensc/udp-request/config.json <<EOF
+{
+  "listen": ":${port}",
+  "stream_buffer": 33554432,
+  "receive_buffer": 83886080,
+  "auth": {"mode":"passwords"}
+}
+EOF
+ systemctl restart udp-request; result "UDP REQUEST PORT UPDATED" "Port : $port" "Status : SUCCESS"
+}
+exclude_port(){
+ header "EXCLUDE UDP REQUEST PORT"
+ echo "Example: 7100,7200,7300"
+ read -rp "Exclude Port(s): " ports
+ [[ -n "$ports" ]] || return
+ local exec
+ exec=$(systemctl cat udp-request 2>/dev/null | sed -n 's/^ExecStart=//p' | head -1)
+ [[ -n "$exec" ]] || { echo -e "${RED}Service ExecStart not found.${plain}"; sleep 2; return; }
+ exec=$(echo "$exec" | sed -E 's/[[:space:]]+--exclude[= ]+[^ ]+//g')
+ mkdir -p /etc/systemd/system/udp-request.service.d
+ cat > /etc/systemd/system/udp-request.service.d/override.conf <<EOF
+[Service]
+ExecStart=
+ExecStart=$exec --exclude $ports
+EOF
+ systemctl daemon-reload; systemctl restart udp-request; result "UDP REQUEST EXCLUDE PORT UPDATED" "Exclude : $ports" "Status : SUCCESS"
+}
+while true; do
+ header "UDP REQUEST"
+ echo -e "  ${WHITE}Status : $(status_now)${plain}"; echo
+ echo -e "  ${CYAN}[01]${plain} ${WHITE}Install / Repair${plain}"; offset=1
+ base=$((offset+1))
+ echo -e "  ${CYAN}[$(printf '%02d' $base)]${plain} ${WHITE}Enable${plain}"
+ echo -e "  ${CYAN}[$(printf '%02d' $((base+1)))]${plain} ${WHITE}Disable${plain}"
+ echo -e "  ${CYAN}[$(printf '%02d' $((base+2)))]${plain} ${WHITE}Restart${plain}"
+ echo -e "  ${CYAN}[$(printf '%02d' $((base+3)))]${plain} ${WHITE}Change Port${plain}"
+ echo -e "  ${CYAN}[$(printf '%02d' $((base+4)))]${plain} ${WHITE}Exclude Port${plain}"
+ echo -e "  ${CYAN}[00]${plain} ${WHITE}Back to Extra Protocol${plain}"
+ read -rp "Select option: " opt
+ case "$opt" in
+ 1|01) install_service;; 2|02) enable_s;; 3|03) disable_s;; 4|04) restart_s;; 5|05) change_port;; 6|06) exclude_port;;
+ 0|00) exec menu-udp;; x|X) exit 0;; *) echo -e "${RED}Invalid option.${plain}"; sleep 1;; esac
+done
+
+__KZN_MENU_UDP_REQUEST__
+chmod 0755 "$RERE/menu-udp-request"
+bash -n "$RERE/menu-udp-request"
+
+[[ -f "$RERE/menu-dnstt" ]] && cp -a "$RERE/menu-dnstt" "$BACKUP/rere/menu-dnstt" || true
+cat > "$RERE/menu-dnstt" <<'__KZN_MENU_DNSTT__'
+#!/usr/bin/env bash
+source /usr/local/rere/kaizen-ui 2>/dev/null || true
+
+clear
+
+
+# Full Option
+setup-fastdns() {
+clear
+read -p "Input Namserver: " nsd
+
+# package
+apt update
+apt install curl wget -y
+apt install binutils -y
+
+# Copy Core FastDNS
+wget -O /usr/local/bin/fastdoh "https://github.com/DindaPutriFN/fastdns/releases/download/1.0.0/fastdoh.x86-64"
+chmod +x /usr/local/bin/fastdoh
+
+cat > /etc/systemd/system/fastdns.service <<'EOF'
+[Unit]
+Description=KaizenSC FastDNS
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/fastdoh
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target
+EOF
+systemctl daemon-reload
+systemctl enable fastdns.service
+
+
+# Copy Core DNSTT Client
+wget -q -O /etc/kaizensc/slowdns/dnstt-client "https://raw.githubusercontent.com/fisabiliyusri/SLDNS/main/slowdns/sldns-client"
+chmod +x /etc/kaizensc/slowdns/dnstt-client
+
+# Service Enable Fastdns
+systemctl daemon-reload
+systemctl enable fastdns
+systemctl restart fastdns.service
+
+# Setup Service Fastdns client
+echo -e "[Unit]
+Description=Client SlowDNS By KaizenSCVPN
+Documentation=https://nekopoi.care
+After=network.target nss-lookup.target
+
+[Service]
+Type=simple
+User=root
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_BIND_SERVICE
+AmbientCapabilities=CAP_NET_ADMIN CAP_NET_BIND_SERVICE
+NoNewPrivileges=true
+ExecStart=/etc/kaizensc/slowdns/dnstt-client -doh http://127.0.0.1:5053/dns-query -pubkey-file /etc/kaizensc/slowdns/server.pub $nsd 127.0.0.1:7000
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target" > /etc/systemd/system/dnstt-client.service
+
+# Enable Service Client
+systemctl daemon-reload
+systemctl start dnstt-client.service
+systemctl enable dnstt-client.service
+
+# Done Status
+clear
+echo -e "\n Done Active FastDNS & DNSTT Client On Port 5053 & 7000"
+}
+
+clear
+red='\e[0;31m'
+green='\e[0;32m'
+NC='\033[0;97m'
+white='\033[0;97m'
+    mna89() {
+        clear
+            status="$(systemctl show dnstt.service --no-page)"
+            status_text=$(echo "${status}" | grep 'ActiveState=' | cut -f2 -d=)
+            status2="$(systemctl show fastdns.service --no-page)"
+            status_text2=$(echo "${status2}" | grep 'ActiveState=' | cut -f2 -d=)
+            status3="$(systemctl show dnstt-client.service --no-page)"
+            status_text3=$(echo "${status3}" | grep 'ActiveState=' | cut -f2 -d=)
+        clear
+        kaizen_header " • FastDNS / DNSTT • "
+        
+        if [ "${status_text}" == "active" ]; then
+            echo -e "        ${white}DNSTT Server${NC}: "${green}"running"$NC" ✓"
+        else
+            echo -e "        ${white}DNSTT Server${NC}: "$red"not running (Error)"$NC" "
+        fi
+        if [ "${status_text2}" == "active" ]; then
+            echo -e "        ${white}FastDNS${NC}: "${green}"running"$NC" ✓"
+        else
+            echo -e "        ${white}FastDNS${NC}: "$red"not running (Error)"$NC" "
+        fi
+        if [ "${status_text3}" == "active" ]; then
+            echo -e "        ${white}DNSTT Client${NC}: "${green}"running"$NC" ✓"
+        else
+            echo -e "        ${white}DNSTT Client${NC}: "$red"not running (Error)"$NC" "
+        fi
+        echo -e "
+        [01] Change Nameserver
+        [02] Renew Public Key & Server Key
+        [03] Restart DNSTT Tunnel on Server
+    	[04] Setup FastDNS
+        [00] Back to Extra Protocol
+        =============================
+        Press CTRL + C to Exit"
+        
+        read -p "Input Options: " dn1
+        case $dn1 in
+            1)
+                clear
+                nsd=$(cat /etc/kaizensc/slowdns/nameserver 2>/dev/null || echo "No nameserver found.")
+                clear
+                echo -e "
+                =================
+                Change Nameserver
+                =================
+                Nameserver: $nsd
+                "
+                read -p "Input Nameserver: " nsdomen
+                clear
+                echo "${nsdomen}" > /etc/kaizensc/slowdns/nameserver
+                systemctl stop dnstt.service
+                systemctl disable dnstt.service
+                clear
+                
+                echo -e "[Unit]
+                Description=SlowDNS FN Project Autoscript Service
+                Documentation=https://t.me/fn_project
+                After=network.target nss-lookup.target
+
+                [Service]
+                Type=simple
+                User=root
+                CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_BIND_SERVICE
+                AmbientCapabilities=CAP_NET_ADMIN CAP_NET_BIND_SERVICE
+                NoNewPrivileges=true
+                ExecStart=/etc/kaizensc/slowdns/dnstt-server -udp :5300 -privkey-file /etc/kaizensc/slowdns/server.key $nsdomen 127.0.0.1:109
+                Restart=on-failure
+
+                [Install]
+                WantedBy=multi-user.target" > /etc/systemd/system/dnstt.service
+                systemctl daemon-reload
+                systemctl enable dnstt
+                systemctl start dnstt
+                clear
+                iptables -I INPUT -p udp --dport 5300 -j ACCEPT
+                iptables -t nat -I PREROUTING -i eth0 -p udp --dport 53 -j REDIRECT --to-ports 5300
+                iptables -I INPUT -p udp --dport 5300 -j ACCEPT
+                iptables -t nat -I PREROUTING -i eth0 -p udp --dport 53 -j REDIRECT --to-ports 5300
+                clear
+                echo -e "
+                Success Change Nameserver DNSTT
+                ===============================
+                New Nameserver: $nsdomen
+                ==============================="
+                ;;
+            2)
+                clear
+                systemctl stop dnstt.service
+                systemctl disable dnstt.service
+                clear
+                chmod +x /etc/kaizensc/slowdns/dns-server
+                /etc/kaizensc/slowdns/dnstt-server -gen-key -privkey-file /etc/kaizensc/slowdns/server.key -pubkey-file /etc/kaizensc/slowdns/server.pub
+                systemctl daemon-reload
+                systemctl enable dnstt.service
+                systemctl start dnstt.service
+                clear
+                echo -e "
+                Success Renew Public Key & Server Key Slowdns
+                ============================================="
+                ;;
+            3)
+                clear
+                systemctl daemon-reload
+                systemctl restart dnstt.service
+                systemctl restart fastdns.service
+                systemctl restart dnstt-client.service
+                clear
+                echo -e "
+                Success Restart SlowDNS
+                ========================"
+                ;;
+	    4)
+ 	        clear
+ 	        setup-fastdns
+	        ;;
+            0)
+                menu-udp
+                ;;
+            *)
+                clear
+                mna89
+                ;;
+        esac
+    }
+    mna89
+
+__KZN_MENU_DNSTT__
+chmod 0755 "$RERE/menu-dnstt"
+bash -n "$RERE/menu-dnstt"
+
+[[ -f "$RERE/menu" ]] && cp -a "$RERE/menu" "$BACKUP/rere/menu" || true
+cat > "$RERE/menu" <<'__KZN_MENU__'
+#!/usr/bin/env bash
+
+clear
+
+# === COLOUR ===
+export red='\033[0;31m'
+export NC='\033[0m'
+export cyan='\e[0;36m'
+export green='\e[0;32m'
+RED='\e[0;31m'
+GREEN='\e[0;32m'
+YELLOW='\e[0;33m'
+CYAN="\e[0;36m"
+WHITE='\e[0;97m'
+red='\e[0;31m'
+green='\e[0;32m'
+yellow='\e[0;33m'
+cyan="\e[0;36m"
+white='\e[0;97m'
+plain='\e[0m'
+bgPutih="\e[0;47;30m"
+keatas="${CYAN}│${plain}"
+keatas2="${CYAN}║${plain}"
+
+# === RAINBOW LINE ===
+function cmd()
+{
+  printf "  "
+  for i in {52..57} {57..52}
+  do
+  printf "\e[38;5;${i}m────\e[0m"
+  done
+  echo
+}
+
+# main data
+domain=$(cat /etc/xray/domain)
+
+# system data
+ml=$(lsb_release -ds 2>/dev/null || true)
+[[ -z "$ml" && -r /etc/os-release ]] && ml=$(. /etc/os-release; printf '%s' "${PRETTY_NAME:-$NAME}")
+ml=${ml:-Unknown}
+tram=$(free -m 2>/dev/null | awk 'NR==2 {print $2}')
+tram=${tram:-0}
+
+# VPS network/location details
+vps_ip=$(tr -d '\r\n' < /root/.ip 2>/dev/null || true)
+[[ -n "$vps_ip" ]] || vps_ip=$(curl -4 -fsS --max-time 4 ipinfo.io/ip 2>/dev/null || true)
+vps_ip=${vps_ip:-Unknown}
+country=$(tr -d '\r\n' < /root/.country 2>/dev/null || true)
+if [[ -z "$country" ]]; then
+  if command -v jq >/dev/null 2>&1; then
+    country=$(curl -4 -fsS --max-time 4 https://ipwho.is/ 2>/dev/null | jq -r '.country // empty' 2>/dev/null || true)
+  fi
+  [[ -n "$country" ]] || country=$(curl -4 -fsS --max-time 4 ipinfo.io/country 2>/dev/null || true)
+fi
+country=${country:-Unknown}
+
+# Uptime since last reboot, shown as total hours + minutes.
+uptime_seconds=$(awk '{print int($1)}' /proc/uptime 2>/dev/null || echo 0)
+[[ "$uptime_seconds" =~ ^[0-9]+$ ]] || uptime_seconds=0
+uptime_hours=$((uptime_seconds / 3600))
+uptime_minutes=$(((uptime_seconds % 3600) / 60))
+uptime_text="${uptime_hours} hours, ${uptime_minutes} minutes"
+
+# server ping
+url=$(cat /etc/kaizensc/url/ping.url)
+
+ping=$(ping_result=$(ping -c 1 $url | grep -oP 'time=\K\d+\.\d+')
+if (( $(echo "$ping_result < 100" | bc -l) )); then
+    echo -e "\e[0;32m$ping_result ms\e[0m"
+elif (( $(echo "$ping_result < 200" | bc -l) )); then
+    echo -e "\e[0;33m$ping_result ms\e[0m"
+else
+    echo -e "\e[0;31m$ping_result ms\e[0m"
+fi)
+
+    # URL permission configuration
+    PERMISSION_URL="https://kznsc.kznvpn.com/izin.txt"
+    LOCAL_IP=$(cat /root/.ip) # Getting the local IP address
+
+    # Function to calculate remaining time
+    calculate_remaining_days() {
+        local today=$(date +%s)
+        local expired_date=$(date -d "$1" +%s 2>/dev/null)
+        if [ $? -ne 0 ]; then
+            echo "Invalid expiration date."
+            exit 1
+        fi
+        echo $(( (expired_date - today) / 86400 ))
+    }
+
+    # Getting permission and validation
+    clear
+    PERMISSION_DATA=$(curl -s "$PERMISSION_URL" || { echo "Failed to obtain permission."; exit 1; })
+
+    # Match data based on the local IP address.
+    MATCH=$(echo "$PERMISSION_DATA" | grep "###" | grep "$LOCAL_IP")
+    if [ -z "$MATCH" ]; then
+        echo "Your IP doesn’t have on database"
+        exit 1
+    fi
+
+    # Extract data from the matching row.
+    CLIENT_NAME=$(echo "$MATCH" | awk '{print $2}')
+    CLIENT_IP=$(echo "$MATCH" | awk '{print $3}')
+    EXP_DATE=$(echo "$MATCH" | awk '{print $5}')
+
+    # Validate active period
+    DAYS_LEFT=$(calculate_remaining_days "$EXP_DATE")
+    if [ "$DAYS_LEFT" -lt 0 ]; then
+        echo "The permission has expired."
+        exit 1
+    fi
+
+# data isp
+isp=$(tr -d '\r\n' < /root/.isp 2>/dev/null || true)
+isp=${isp:-Unknown}
+
+# Detail Badwidth
+clear
+
+# Function to read vnstat data
+read_vnstat_usage() {
+  local interface=$1
+  local today=$(vnstat -i "$interface" | grep "today" | awk '{print $8" "$9}')
+  local yesterday=$(vnstat -i "$interface" | grep "yesterday" | awk '{print $8" "$9}')
+  local this_month=$(vnstat -i "$interface" -m | grep "$(date +"%b '%y")" | awk '{print $9" "$10}')
+  
+  echo "$today;$yesterday;$this_month"
+}
+
+# Function to convert to MB unit
+convert_to_mb() {
+  local value=$1
+  local unit=$2
+  
+  case $unit in
+    B) echo "scale=6; $value / 1048576" | bc ;;
+    KiB) echo "scale=6; $value / 1024" | bc ;;
+    MiB) echo "$value" ;;
+    GiB) echo "scale=6; $value * 1024" | bc ;;
+    TiB) echo "scale=6; $value * 1048576" | bc ;;
+    *) echo "0" ;;
+  esac
+}
+
+# Get all interfaces
+all_interfaces=$(vnstat --iflist | sed 's/Available interfaces: //')
+if [ -z "$all_interfaces" ]; then
+  echo "There are no interfaces available in vnstat."
+  exit 1
+fi
+
+total_today=0
+total_yesterday=0
+total_month=0
+
+for iface in $all_interfaces; do
+  echo "“Processing interface: $iface"
+  result=$(read_vnstat_usage "$iface")
+  echo "Result for $iface: $result"
+  
+  today=$(echo "$result" | awk -F';' '{print $1}')
+  yesterday=$(echo "$result" | awk -F';' '{print $2}')
+  month=$(echo "$result" | awk -F';' '{print $3}')
+  
+  today_value=$(echo "$today" | awk '{print $1}')
+  today_unit=$(echo "$today" | awk '{print $2}')
+  
+  yesterday_value=$(echo "$yesterday" | awk '{print $1}')
+  yesterday_unit=$(echo "$yesterday" | awk '{print $2}')
+  
+  month_value=$(echo "$month" | awk '{print $1}')
+  month_unit=$(echo "$month" | awk '{print $2}')
+  
+  total_today=$(echo "$total_today + $(convert_to_mb $today_value $today_unit)" | bc)
+  total_yesterday=$(echo "$total_yesterday + $(convert_to_mb $yesterday_value $yesterday_unit)" | bc)
+  total_month=$(echo "$total_month + $(convert_to_mb $month_value $month_unit)" | bc)
+done
+
+# Format result
+format_usage() {
+  local value=$1
+  if (( $(echo "$value >= 1024" | bc -l) )); then
+    echo "$(printf "%.2f" $(echo "$value / 1024" | bc)) GB"
+  else
+    echo "$(printf "%.2f" $value) MB"
+  fi
+}
+
+ttoday=$(format_usage "$total_today")
+tyest=$(format_usage "$total_yesterday")
+tmon=$(format_usage "$total_month")
+
+count_kaizen_ssh_accounts() {
+  local db='/etc/kaizensc/database/ssh/database.json' user entry uid count=0
+  [[ -s "$db" ]] || { echo 0; return; }
+  command -v jq >/dev/null 2>&1 || { echo 0; return; }
+  while IFS= read -r user; do
+    [[ -n "$user" ]] || continue
+    entry=$(getent passwd "$user" 2>/dev/null || true)
+    [[ -n "$entry" ]] || continue
+    uid=$(printf '%s' "$entry" | awk -F: '{print $3}')
+    [[ "$uid" =~ ^[0-9]+$ ]] || continue
+    (( uid >= 1000 && uid != 65534 )) || continue
+    ((count+=1))
+  done < <(jq -r '.[].Username // empty' "$db" 2>/dev/null | sort -u)
+  echo "$count"
+}
+
+# Total account
+xrayvless=$(xray-account count vless 2>/dev/null || echo 0)
+xrayvmess=$(xray-account count vmess 2>/dev/null || echo 0)
+xraytrojan=$(xray-account count trojan 2>/dev/null || echo 0)
+ssc=$(grep -c "###" /etc/shadowsocks-libev/akun.conf 2>/dev/null || true)
+sshd=$(count_kaizen_ssh_accounts)
+
+clear
+echo -e ""
+echo -e "${CYAN}┌─────────────────────────────────────────────────┐${plain}"
+echo -e "${keatas} ${bgPutih}               • VPN PANEL MENU •              ${plain} ${keatas}"
+echo -e "${CYAN}└─────────────────────────────────────────────────┘${plain}"
+echo -e "${white}  OS               : $ml"
+echo -e "${white}  RAM              : $tram MB"
+echo -e "${white}  ISP              : $isp"
+echo -e "${white}  IP               : $vps_ip"
+echo -e "${white}  Domain           : $domain"
+echo -e "${white}  Country          : $country"
+echo -e "${white}  Uptime           : ${YELLOW}$uptime_text${white}"
+echo -e "${white}  Usage Today      : ${GREEN}$ttoday${white}"
+echo -e "${white}  Usage Yesterday  : ${GREEN}$tyest${white}"
+echo -e "${white}  Usage Monthly    : ${GREEN}$tmon${NC}"
+echo -e "${CYAN}┌─────────────────────────────────────────────────┐${plain}"
+echo -e "${keatas} ${bgPutih}                • TOTAL ACCOUNT •              ${plain} ${keatas}"
+echo -e "${CYAN}└─────────────────────────────────────────────────┘${plain}"
+printf "${white}     %-12s : %s   %-12s : %s\n" "SSH/Dropbear" "$sshd" "Xray VLESS" "$xrayvless"
+printf "${white}     %-12s : %s   %-12s : %s\n" "Xray VMess" "$xrayvmess" "Xray Trojan" "$xraytrojan"
+printf "${white}     %-12s : %s\n" "Shadowsocks" "$ssc"
+echo -e "${CYAN}┌─────────────────────────────────────────────────┐${plain}"
+echo -e "${keatas} ${bgPutih}                  • MENU LIST •                ${plain} ${keatas}"
+echo -e "${CYAN}└─────────────────────────────────────────────────┘${plain}"
+echo -e "  ${CYAN}[ 1 ]${plain} ${white}Menu SSH${plain}          ${CYAN}[ 6 ]${plain} ${white}Menu Wireguard${plain}"
+echo -e "  ${CYAN}[ 2 ]${plain} ${white}Menu Vless${plain}        ${CYAN}[ 7 ]${plain} ${white}Menu ZiVPN${plain}"
+echo -e "  ${CYAN}[ 3 ]${plain} ${white}Menu Vmess${plain}        ${CYAN}[ 8 ]${plain} ${white}Extra Protocol${plain}"
+echo -e "  ${CYAN}[ 4 ]${plain} ${white}Menu Trojan${plain}       ${CYAN}[ 9 ]${plain} ${white}Menu System VPS${plain}"
+echo -e "  ${CYAN}[ 5 ]${plain} ${white}Menu Shadowsocks${plain}  ${CYAN}[ x ]${plain} ${white}Exit${plain}"
+cmd
+echo -e "${white}  Username   : ${GREEN}$CLIENT_NAME${white}"
+echo -e "${white}  IP Address : ${GREEN}$CLIENT_IP"
+echo -e "${white}  Expire     : ${GREEN}$EXP_DATE${white} [ ${YELLOW}${DAYS_LEFT} ${white}days left ]${NC}"
+cmd
+read -p "  Input Option [1-9 or x]: " lahiya
+case $lahiya in
+1|01) clear ; menu-ssh ;;
+2|02) clear ; menu-vless ;;
+3|03) clear ; menu-vmess ;;
+4|04) clear ; menu-trojan ;;
+5|05) clear ; menu-ss ;;
+6|06) clear ; menu-wgcf ;;
+7|07) clear ; menu-udp-zivpn ;;
+8|08) clear ; menu-udp ;;
+9|09) clear ; menu-system ;;
+x|X) exit ;;
+*) clear ; menu ;;
+esac
+
+__KZN_MENU__
+chmod 0755 "$RERE/menu"
+bash -n "$RERE/menu"
+
+
+# Persistent Wireguard expiry cleanup.
+[[ -f /etc/crontab ]] && cp -a /etc/crontab "$BACKUP/crontab" || true
+if [[ -f /etc/crontab ]] && ! grep -q '/usr/local/rere/xp-wireguard' /etc/crontab; then
+  echo '*/15 * * * * root /usr/local/rere/xp-wireguard >/dev/null 2>&1' >> /etc/crontab
+fi
+systemctl restart cron >/dev/null 2>&1 || true
+
+# Preserve current text-brightness selection; default to Normal if no state exists.
+mkdir -p /etc/kaizensc
+[[ -s /etc/kaizensc/text-brightness.conf ]] || printf 'normal\n' > /etc/kaizensc/text-brightness.conf
+
+# Runtime UI sanity checks.
+source "$RERE/kaizen-ui"
+for fn in kaizen_xray_table_header kaizen_xray_table_row kaizen_unlock_table_header kaizen_unlock_table_row; do
+  declare -F "$fn" >/dev/null || { echo "Missing UI helper: $fn"; exit 1; }
+done
+
+echo
+echo "Patch installed successfully."
+echo "Backup: $BACKUP"
+echo "Main changes: SSH/Xray lock-unlock, Shadowsocks, Wireguard manager, ZiVPN UI, Extra Protocol/FastDNS, UDP menus, port detail and rebuild reboot flow."
