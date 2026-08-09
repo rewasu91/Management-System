@@ -3,7 +3,7 @@ set -euo pipefail
 
 RERE='/usr/local/rere'
 STAMP="$(date +%Y%m%d-%H%M%S)"
-BACKUP="/root/kaizensc-info-layout-backup-${STAMP}"
+BACKUP="/root/kaizensc-vps-panel-info-backup-${STAMP}"
 
 if [[ ${EUID:-$(id -u)} -ne 0 ]]; then
   echo "Please run this patch as root."
@@ -18,7 +18,7 @@ for f in menu info; do
 done
 
 
-cat > "$RERE/menu" <<'__KAIZEN_MENU_LAYOUT_FIX__'
+cat > "$RERE/menu" <<'__KAIZEN_MENU_VPS_PANEL_INFO__'
 #!/usr/bin/env bash
 
 clear
@@ -58,8 +58,31 @@ function cmd()
 domain=$(cat /etc/xray/domain)
 
 # system data
-ml=$(echo "$(lsb_release -ds)")
-tram=$(free -m | awk 'NR==2 {print $2}')
+ml=$(lsb_release -ds 2>/dev/null || true)
+[[ -z "$ml" && -r /etc/os-release ]] && ml=$(. /etc/os-release; printf '%s' "${PRETTY_NAME:-$NAME}")
+ml=${ml:-Unknown}
+tram=$(free -m 2>/dev/null | awk 'NR==2 {print $2}')
+tram=${tram:-0}
+
+# VPS network/location details
+vps_ip=$(tr -d '\r\n' < /root/.ip 2>/dev/null || true)
+[[ -n "$vps_ip" ]] || vps_ip=$(curl -4 -fsS --max-time 4 ipinfo.io/ip 2>/dev/null || true)
+vps_ip=${vps_ip:-Unknown}
+country=$(tr -d '\r\n' < /root/.country 2>/dev/null || true)
+if [[ -z "$country" ]]; then
+  if command -v jq >/dev/null 2>&1; then
+    country=$(curl -4 -fsS --max-time 4 https://ipwho.is/ 2>/dev/null | jq -r '.country // empty' 2>/dev/null || true)
+  fi
+  [[ -n "$country" ]] || country=$(curl -4 -fsS --max-time 4 ipinfo.io/country 2>/dev/null || true)
+fi
+country=${country:-Unknown}
+
+# Uptime since last reboot, shown as total hours + minutes.
+uptime_seconds=$(awk '{print int($1)}' /proc/uptime 2>/dev/null || echo 0)
+[[ "$uptime_seconds" =~ ^[0-9]+$ ]] || uptime_seconds=0
+uptime_hours=$((uptime_seconds / 3600))
+uptime_minutes=$(((uptime_seconds % 3600) / 60))
+uptime_text="${uptime_hours} hours, ${uptime_minutes} minutes"
 
 # server ping
 url=$(cat /etc/kaizensc/url/ping.url)
@@ -112,7 +135,8 @@ fi)
     fi
 
 # data isp
-isp=$(cat /root/.isp)
+isp=$(tr -d '\r\n' < /root/.isp 2>/dev/null || true)
+isp=${isp:-Unknown}
 
 # Detail Badwidth
 clear
@@ -205,7 +229,10 @@ echo -e "${CYAN}└────────────────────�
 echo -e "${white}  OS               : $ml"
 echo -e "${white}  RAM              : $tram MB"
 echo -e "${white}  ISP              : $isp"
+echo -e "${white}  Country          : $country"
+echo -e "${white}  IP               : $vps_ip"
 echo -e "${white}  Domain           : $domain"
+echo -e "${white}  Uptime           : ${GREEN}$uptime_text${white}"
 echo -e "${white}  Usage Today      : ${GREEN}$ttoday${white}"
 echo -e "${white}  Usage Yesterday  : ${GREEN}$tyest${white}"
 echo -e "${white}  Usage Monthly    : ${GREEN}$tmon${NC}"
@@ -243,11 +270,11 @@ x|X) exit ;;
 *) clear ; menu ;;
 esac
 
-__KAIZEN_MENU_LAYOUT_FIX__
+__KAIZEN_MENU_VPS_PANEL_INFO__
 chmod 0755 "$RERE/menu"
 
 
-cat > "$RERE/info" <<'__KAIZEN_INFO_LAYOUT_FIX__'
+cat > "$RERE/info" <<'__KAIZEN_INFO_VPS_PANEL_INFO__'
 #!/usr/bin/env bash
 
 # === COLOUR ===
@@ -319,8 +346,25 @@ RAM=$(free -m 2>/dev/null | awk '/Mem:/ {print $2; exit}')
 RAM=${RAM:-0}
 ISP=$(read_file /root/.isp)
 ISP=${ISP:-Unknown}
+COUNTRY=$(read_file /root/.country)
+if [[ -z "$COUNTRY" ]]; then
+    if command -v jq >/dev/null 2>&1; then
+        COUNTRY=$(curl -4 -fsS --max-time 4 https://ipwho.is/ 2>/dev/null | jq -r '.country // empty' 2>/dev/null || true)
+    fi
+    [[ -n "$COUNTRY" ]] || COUNTRY=$(curl -4 -fsS --max-time 4 ipinfo.io/country 2>/dev/null || true)
+fi
+COUNTRY=${COUNTRY:-Unknown}
+VPS_IP=$(read_file /root/.ip)
+[[ -n "$VPS_IP" ]] || VPS_IP=$(curl -4 -fsS --max-time 4 ipinfo.io/ip 2>/dev/null || true)
+VPS_IP=${VPS_IP:-Unknown}
 DOMAIN=$(read_file /etc/xray/domain)
 DOMAIN=${DOMAIN:-Unknown}
+
+UPTIME_SECONDS=$(awk '{print int($1)}' /proc/uptime 2>/dev/null || echo 0)
+[[ "$UPTIME_SECONDS" =~ ^[0-9]+$ ]] || UPTIME_SECONDS=0
+UPTIME_HOURS=$((UPTIME_SECONDS / 3600))
+UPTIME_MINUTES=$(((UPTIME_SECONDS % 3600) / 60))
+UPTIME_TEXT="${UPTIME_HOURS} hours, ${UPTIME_MINUTES} minutes"
 
 # === CLIENT DETAILS ===
 PERMISSION_URL='https://kznsc.kznvpn.com/izin.txt'
@@ -409,7 +453,10 @@ echo -e "${CYAN}└────────────────────�
 echo -e "${white}  OS               : $OS"
 echo -e "${white}  RAM              : ${RAM} MB"
 echo -e "${white}  ISP              : $ISP"
+echo -e "${white}  Country          : $COUNTRY"
+echo -e "${white}  IP               : $VPS_IP"
 echo -e "${white}  Domain           : $DOMAIN"
+echo -e "${white}  Uptime           : ${GREEN}$UPTIME_TEXT${white}"
 echo -e "${white}  Usage Today      : ${GREEN}$ttoday${white}"
 echo -e "${white}  Usage Yesterday  : ${GREEN}$tyest${white}"
 echo -e "${white}  Usage Monthly    : ${GREEN}$tmon${NC}"
@@ -440,7 +487,7 @@ cmd
 echo -e "            ${white} To access, use ${GREEN}menu${NC} command"
 cmd
 
-__KAIZEN_INFO_LAYOUT_FIX__
+__KAIZEN_INFO_VPS_PANEL_INFO__
 chmod 0755 "$RERE/info"
 
 
@@ -450,6 +497,4 @@ bash -n "$RERE/info"
 echo
 echo "Patch installed successfully."
 echo "Backup: $BACKUP"
-echo "- TOTAL ACCOUNT main menu now matches info."
-echo "- SERVICE STATUS reordered and Dropbear removed from display."
-echo "- Client expiry now uses [ N days left ]."
+echo "VPS Panel now shows OS, RAM, ISP, Country, IP, Domain, Uptime, and bandwidth usage."
