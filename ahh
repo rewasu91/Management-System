@@ -2,8 +2,7 @@
 set -euo pipefail
 RERE=/usr/local/rere
 STAMP="$(date +%Y%m%d-%H%M%S)"
-BACKUP="/root/kaizensc-dynamic-table-backup-${STAMP}"
-
+BACKUP="/root/kaizensc-total-inline-backup-${STAMP}"
 [[ ${EUID:-$(id -u)} -eq 0 ]] || { echo "Please run as root."; exit 1; }
 [[ -d "$RERE" ]] || { echo "KaizenSC not found: $RERE"; exit 1; }
 mkdir -p "$BACKUP"
@@ -130,6 +129,13 @@ kaizen_ssh_table_row(){
    "$w" "$KZN_SSH_EXP_W" "$exp" "$c" \
    "$w" "$KZN_SSH_IP_W" "$3" "$c" "$r"
 }
+kaizen_ssh_table_total_row(){
+  local total="$1" c w y r inner
+  c=$(kaizen_table_colour); w=$(kaizen_text_colour); y=$(kaizen_yellow); r=$(kaizen_reset)
+  inner=$((KZN_SSH_USER_W + KZN_SSH_EXP_W + KZN_SSH_IP_W + 8))
+  printf '%b├%s┤%b\n' "$c" "$(kaizen_repeat_line '─' "$inner")" "$r"
+  printf '%b│%b Total User : %b%-*s%b│%b\n' "$c" "$w" "$y" "$((inner-14))" "$total" "$c" "$r"
+}
 kaizen_ssh_table_footer(){
  local c r a b d; c=$(kaizen_table_colour); r=$(kaizen_reset)
  a=$(kaizen_repeat_line '─' $((KZN_SSH_USER_W+2)))
@@ -138,29 +144,12 @@ kaizen_ssh_table_footer(){
  printf '%b└%s┴%s┴%s┘%b\n' "$c" "$a" "$b" "$d" "$r"
 }
 
-kaizen_xray_table_header(){
- local proto="${1:-}" c r bg='\e[0;47;30m' a b q d
- kaizen_xray_table_prepare "$proto"
- c=$(kaizen_table_colour); r=$(kaizen_reset)
- a=$(kaizen_repeat_line '─' $((KZN_XRAY_USER_W+2)))
- b=$(kaizen_repeat_line '─' $((KZN_XRAY_EXP_W+2)))
- q=$(kaizen_repeat_line '─' $((KZN_XRAY_QUOTA_W+2)))
- d=$(kaizen_repeat_line '─' $((KZN_XRAY_IP_W+2)))
- printf '%b┌%s┬%s┬%s┬%s┐%b\n' "$c" "$a" "$b" "$q" "$d" "$r"
- printf '%b│%b%b %-*s %b%b│%b%b %-*s %b%b│%b%b %-*s %b%b│%b%b %-*s %b%b│%b\n' \
-   "$c" "$r" "$bg" "$KZN_XRAY_USER_W" Username "$r" "$c" \
-   "$r" "$bg" "$KZN_XRAY_EXP_W" "Expire Date" "$r" "$c" \
-   "$r" "$bg" "$KZN_XRAY_QUOTA_W" Quota "$r" "$c" \
-   "$r" "$bg" "$KZN_XRAY_IP_W" IP "$r" "$c" "$r"
- printf '%b├%s┼%s┼%s┼%s┤%b\n' "$c" "$a" "$b" "$q" "$d" "$r"
-}
-kaizen_xray_table_row(){
- local c w r exp; c=$(kaizen_table_colour); w=$(kaizen_text_colour); r=$(kaizen_reset); exp="${2%% *}"
- printf '%b│%b %-*s %b│%b %-*s %b│%b %-*s %b│%b %-*s %b│%b\n' \
-   "$c" "$w" "$KZN_XRAY_USER_W" "$1" "$c" \
-   "$w" "$KZN_XRAY_EXP_W" "$exp" "$c" \
-   "$w" "$KZN_XRAY_QUOTA_W" "$3" "$c" \
-   "$w" "$KZN_XRAY_IP_W" "$4" "$c" "$r"
+kaizen_xray_table_total_row(){
+  local total="$1" c w y r inner
+  c=$(kaizen_table_colour); w=$(kaizen_text_colour); y=$(kaizen_yellow); r=$(kaizen_reset)
+  inner=$((KZN_XRAY_USER_W + KZN_XRAY_EXP_W + KZN_XRAY_QUOTA_W + KZN_XRAY_IP_W + 11))
+  printf '%b├%s┤%b\n' "$c" "$(kaizen_repeat_line '─' "$inner")" "$r"
+  printf '%b│%b Total User : %b%-*s%b│%b\n' "$c" "$w" "$y" "$((inner-14))" "$total" "$c" "$r"
 }
 kaizen_xray_table_footer(){
  local c r a b q d; c=$(kaizen_table_colour); r=$(kaizen_reset)
@@ -274,8 +263,8 @@ while IFS=$'\t' read -r user limit exp; do
   kaizen_ssh_table_row "$user" "$exp" "$ltxt"
   total_users=$((total_users + 1))
 done < <(jq -r '.[] | [.Username, (.LimitIP // "0"), (.Expired // "Lifetime")] | @tsv' "$DB" 2>/dev/null)
+kaizen_ssh_table_total_row "$total_users"
 kaizen_ssh_table_footer
-kaizen_total_users "$total_users"
 
 echo
 read -rp 'Enter username to view detailed information (blank = back): ' wanted
@@ -304,326 +293,6 @@ printf '%bLast Login : %s%b
 __KZN_LIST_SSH__
 chmod 0755 "$RERE/list-ssh"
 bash -n "$RERE/list-ssh"
-
-[[ -f "$RERE/extend-ssh" ]] && cp -a "$RERE/extend-ssh" "$BACKUP/extend-ssh" || true
-cat > "$RERE/extend-ssh" <<'__KZN_EXTEND_SSH__'
-#!/usr/bin/env bash
-source /usr/local/rere/kaizen-ui 2>/dev/null || true
-set -u
-DB=/etc/kaizensc/database/ssh/database.json
-[[ -s "$DB" ]] || { echo 'No SSH account found.'; exit 0; }
-clear
-kaizen_header " • Extend SSH Account • "
-kaizen_ssh_table_header
-jq -r '.[]|[.Username,(.Expired//"Lifetime"),(.LimitIP//0)] | @tsv' "$DB" | while IFS=$'\t' read -r u e l; do
- kaizen_is_ssh_account_user "$u" || continue
- [[ "$l" =~ ^[0-9]+$ ]] || l=0
- (( l > 0 )) && ltxt="$l" || ltxt='UL'
- kaizen_ssh_table_row "$u" "$e" "$ltxt"
-done
-kaizen_ssh_table_footer
-read -rp 'Input Username: ' user
-kaizen_is_ssh_account_user "$user" || { echo '[ERROR] SSH account not found.'; exit 1; }
-old=$(jq -r --arg u "$user" '.[]|select(.Username==$u)|.Expired' "$DB" | head -1)
-[[ -n "$old" && "$old" != null ]] || { echo '[ERROR] Account not found.'; exit 1; }
-read -rp 'Use custom expired date? (y/n): ' ans
-if [[ "$ans" =~ ^[Yy]$ ]]; then
-  read -rp 'Custom expired (YYYY-MM-DD): ' custom
-  [[ "$custom" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]] || { echo '[ERROR] Invalid date format.'; exit 1; }
-  new="$custom"
-else
-  read -rp 'Extend (days): ' days
-  [[ "$days" =~ ^[0-9]+$ ]] || { echo '[ERROR] Days must be a number.'; exit 1; }
-  now=$(date +%s); old_epoch=$(date -d "$old" +%s 2>/dev/null || echo 0)
-  ((old_epoch>now)) && base=$old_epoch || base=$now
-  new=$(date -d "@$((base + days*86400))" '+%F')
-fi
-jq --arg u "$user" --arg e "$new" 'map(if .Username==$u then .Expired=$e else . end)' "$DB" > "$DB.tmp" && mv "$DB.tmp" "$DB"
-# chage uses YYYY-MM-DD directly; user may be nologin but account expiration still applies.
-chage -E "$new" "$user" >/dev/null 2>&1 || true
-clear
-kaizen_header " • SSH ACCOUNT EXTENDED • "
-printf 'Account       : %s\nPrevious      : %s\nNew Expiry    : %s\nStatus        : SUCCESS\n' "$user" "$old" "$new"
-
-__KZN_EXTEND_SSH__
-chmod 0755 "$RERE/extend-ssh"
-bash -n "$RERE/extend-ssh"
-
-[[ -f "$RERE/delete-ssh" ]] && cp -a "$RERE/delete-ssh" "$BACKUP/delete-ssh" || true
-cat > "$RERE/delete-ssh" <<'__KZN_DELETE_SSH__'
-#!/usr/bin/env bash
-source /usr/local/rere/kaizen-ui 2>/dev/null || true
-set -u
-DB=/etc/kaizensc/database/ssh/database.json
-[[ -s "$DB" ]] || { echo 'No SSH account found.'; exit 0; }
-clear
-kaizen_header " • Delete SSH Account • "
-kaizen_ssh_table_header
-jq -r '.[]|[.Username,(.Expired//"Lifetime"),(.LimitIP//0)] | @tsv' "$DB" | while IFS=$'\t' read -r u e l; do
- kaizen_is_ssh_account_user "$u" || continue
- [[ "$l" =~ ^[0-9]+$ ]] || l=0
- (( l > 0 )) && ltxt="$l" || ltxt='UL'
- kaizen_ssh_table_row "$u" "$e" "$ltxt"
-done
-kaizen_ssh_table_footer
-read -rp 'Input Username: ' user
-kaizen_is_ssh_account_user "$user" || { echo '[ERROR] SSH account not found.'; exit 1; }
-jq -e --arg u "$user" '.[]|select(.Username==$u)' "$DB" >/dev/null || { echo '[ERROR] Account not found.'; exit 1; }
-read -rp "Delete SSH account '$user' permanently? (y/n): " yn
-[[ "$yn" =~ ^[Yy]$ ]] || { echo 'Cancelled.'; exit 0; }
-userdel -f -r "$user" >/dev/null 2>&1 || true
-rm -f /etc/kaizensc/limit/ssh/{ip,cache,quota,usage}/"$user" 2>/dev/null || true
-jq --arg u "$user" 'map(select(.Username!=$u))' "$DB" > "$DB.tmp" && mv "$DB.tmp" "$DB"
-kaizen_result_header "SSH ACCOUNT DELETED"
-echo "Account : $user"
-echo "Status  : DELETED PERMANENTLY"
-
-__KZN_DELETE_SSH__
-chmod 0755 "$RERE/delete-ssh"
-bash -n "$RERE/delete-ssh"
-
-[[ -f "$RERE/lock-ssh" ]] && cp -a "$RERE/lock-ssh" "$BACKUP/lock-ssh" || true
-cat > "$RERE/lock-ssh" <<'__KZN_LOCK_SSH__'
-#!/usr/bin/env bash
-source /usr/local/rere/kaizen-ui 2>/dev/null || true
-set -u
-DB=/etc/kaizensc/database/ssh/database.json
-RED='\e[0;31m'; GREEN='\e[0;32m'; NC='\e[0m'
-[[ -s "$DB" ]] || { echo 'No SSH account found.'; exit 0; }
-# normalize Locked field
-jq 'map(if has("Locked") then . else . + {Locked:false} end)' "$DB" > "$DB.tmp" && mv "$DB.tmp" "$DB"
-clear
-kaizen_header " • Lock SSH Account • "
-kaizen_ssh_table_header
-jq -r '.[] | select((.Locked // false)==false) | [.Username,(.Expired//"Lifetime"),(.LimitIP//0)] | @tsv' "$DB" | while IFS=$'\t' read -r u e l; do
- kaizen_is_ssh_account_user "$u" || continue
- [[ "$l" =~ ^[0-9]+$ ]] || l=0
- (( l > 0 )) && ltxt="$l" || ltxt='UL'
- kaizen_ssh_table_row "$u" "$e" "$ltxt"
-done
-kaizen_ssh_table_footer
-count=0
-while read -r u; do kaizen_is_ssh_account_user "$u" && count=$((count+1)); done < <(jq -r '.[]|select((.Locked//false)==false)|.Username' "$DB")
-((count>0)) || { echo 'No unlocked SSH account.'; exit 0; }
-read -rp 'Input Username: ' user
-kaizen_is_ssh_account_user "$user" || { echo '[ERROR] SSH account not found.'; exit 1; }
-exists=$(jq -r --arg u "$user" '.[]|select(.Username==$u and ((.Locked//false)==false))|.Username' "$DB" | head -1)
-[[ -n "$exists" ]] || { echo -e "${RED}Account not found or already locked.${NC}"; exit 1; }
-read -rp "Lock SSH account '$user'? (y/n): " yn
-[[ "$yn" =~ ^[Yy]$ ]] || { echo 'Cancelled.'; exit 0; }
-passwd -l "$user" >/dev/null 2>&1 || usermod -L "$user" >/dev/null 2>&1 || true
-jq --arg u "$user" 'map(if .Username==$u then .Locked=true else . end)' "$DB" > "$DB.tmp" && mv "$DB.tmp" "$DB"
-mkdir -p /etc/kaizensc/recovery/ssh
-printf '%s\tLOCK\t%s\n' "$user" "$(date '+%F %T')" >> /etc/kaizensc/recovery/ssh/recovery.tsv
-kaizen_result_header "SSH ACCOUNT LOCKED"
-echo "Account : $user"
-echo "Status  : LOCKED"
-
-__KZN_LOCK_SSH__
-chmod 0755 "$RERE/lock-ssh"
-bash -n "$RERE/lock-ssh"
-
-[[ -f "$RERE/unlock-ssh" ]] && cp -a "$RERE/unlock-ssh" "$BACKUP/unlock-ssh" || true
-cat > "$RERE/unlock-ssh" <<'__KZN_UNLOCK_SSH__'
-#!/usr/bin/env bash
-source /usr/local/rere/kaizen-ui 2>/dev/null || true
-set -u
-DB=/etc/kaizensc/database/ssh/database.json
-RED='\e[0;31m'; GREEN='\e[0;32m'; NC='\e[0m'
-[[ -s "$DB" ]] || { echo 'No locked SSH account.'; exit 0; }
-jq 'map(if has("Locked") then . else . + {Locked:false} end)' "$DB" > "$DB.tmp" && mv "$DB.tmp" "$DB"
-count=0
-while read -r u; do kaizen_is_ssh_account_user "$u" && count=$((count+1)); done < <(jq -r '.[]|select((.Locked//false)==true)|.Username' "$DB")
-((count>0)) || { clear; echo 'No locked SSH account.'; exit 0; }
-clear
-kaizen_header " • Unlock SSH Account • "
-kaizen_ssh_table_header
-jq -r '.[] | select((.Locked//false)==true) | [.Username,(.Expired//"Lifetime"),(.LimitIP//0)] | @tsv' "$DB" | while IFS=$'\t' read -r u e l; do
- kaizen_is_ssh_account_user "$u" || continue
- [[ "$l" =~ ^[0-9]+$ ]] || l=0
- (( l > 0 )) && ltxt="$l" || ltxt='UL'
- kaizen_ssh_table_row "$u" "$e" "$ltxt"
-done
-kaizen_ssh_table_footer
-read -rp 'Input Username: ' user
-kaizen_is_ssh_account_user "$user" || { echo '[ERROR] SSH account not found.'; exit 1; }
-exists=$(jq -r --arg u "$user" '.[]|select(.Username==$u and ((.Locked//false)==true))|.Username' "$DB" | head -1)
-[[ -n "$exists" ]] || { echo -e "${RED}Locked account not found.${NC}"; exit 1; }
-usermod -U "$user" >/dev/null 2>&1 || true
-passwd -u "$user" >/dev/null 2>&1 || true
-jq --arg u "$user" 'map(if .Username==$u then .Locked=false else . end)' "$DB" > "$DB.tmp" && mv "$DB.tmp" "$DB"
-mkdir -p /etc/kaizensc/recovery/ssh
-printf '%s\tUNLOCK\t%s\n' "$user" "$(date '+%F %T')" >> /etc/kaizensc/recovery/ssh/recovery.tsv
-kaizen_result_header "SSH ACCOUNT UNLOCKED"
-echo "Account : $user"
-echo "Status  : UNLOCKED"
-
-__KZN_UNLOCK_SSH__
-chmod 0755 "$RERE/unlock-ssh"
-bash -n "$RERE/unlock-ssh"
-
-[[ -f "$RERE/check-ssh-config" ]] && cp -a "$RERE/check-ssh-config" "$BACKUP/check-ssh-config" || true
-cat > "$RERE/check-ssh-config" <<'__KZN_CHECK_SSH_CONFIG__'
-#!/usr/bin/env bash
-source /usr/local/rere/kaizen-ui 2>/dev/null || true
-set -u
-DB=/etc/kaizensc/database/ssh/database.json
-DOMAIN=$(cat /etc/xray/domain 2>/dev/null || hostname -f)
-[[ -s "$DB" ]] || { echo 'No SSH account found.'; exit 0; }
-clear
-kaizen_header " • Check SSH Config • "
-kaizen_ssh_table_header
-jq -r '.[] | [.Username,(.Expired//"Lifetime"),(.LimitIP//0)] | @tsv' "$DB" | while IFS=$'\t' read -r u e l; do
- kaizen_is_ssh_account_user "$u" || continue
- [[ "$l" =~ ^[0-9]+$ ]] || l=0
- (( l > 0 )) && ltxt="$l" || ltxt='UL'
- kaizen_ssh_table_row "$u" "$e" "$ltxt"
-done
-kaizen_ssh_table_footer
-read -rp 'Input Username: ' user
-kaizen_is_ssh_account_user "$user" || { echo '[ERROR] SSH account not found.'; exit 1; }
-row=$(jq -r --arg u "$user" '.[]|select(.Username==$u)|[.Username,.Password,(.LimitIP//0),(.Expired//"Lifetime"),(.Locked//false)]|@tsv' "$DB" | head -1)
-[[ -n "$row" ]] || { echo '[ERROR] Account not found.'; exit 1; }
-IFS=$'\t' read -r u pass lim exp locked <<< "$row"
-[[ "$lim" =~ ^[0-9]+$ ]] || lim=0; ((lim>0)) || lim='Unlimited'
-[[ "$locked" == true ]] && status='LOCKED' || status='ACTIVE'
-clear
-cat <<EOF
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-             SSH ACCOUNT CONFIG
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-Username       : $u
-Password       : $pass
-Status         : $status
-IP Limit       : $lim
-Expire Date    : $exp
-Host           : $DOMAIN
-WebSocket      : 80, 2080, 2082, 8000, 8080, 8880
-TLS/SSL        : 443, 8443
-Payload        : GET /ssh HTTP/1.1[crlf]Host: $DOMAIN[crlf]Upgrade: websocket[crlf][crlf]
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-EOF
-
-__KZN_CHECK_SSH_CONFIG__
-chmod 0755 "$RERE/check-ssh-config"
-bash -n "$RERE/check-ssh-config"
-
-[[ -f "$RERE/change-limit-ip-ssh" ]] && cp -a "$RERE/change-limit-ip-ssh" "$BACKUP/change-limit-ip-ssh" || true
-cat > "$RERE/change-limit-ip-ssh" <<'__KZN_CHANGE_LIMIT_IP_SSH__'
-#!/usr/bin/env bash
-source /usr/local/rere/kaizen-ui 2>/dev/null || true
-set -u
-DB=/etc/kaizensc/database/ssh/database.json
-DIR=/etc/kaizensc/limit/ssh/ip
-[[ -s "$DB" ]] || { echo 'No SSH account found.'; exit 0; }
-mkdir -p "$DIR"
-clear
-kaizen_header " • Edit Limit IP • "
-kaizen_ssh_table_header
-jq -r '.[]|[.Username,(.Expired//"Lifetime"),(.LimitIP//0)] | @tsv' "$DB" | while IFS=$'\t' read -r u e l; do
- kaizen_is_ssh_account_user "$u" || continue
- [[ "$l" =~ ^[0-9]+$ ]] || l=0
- (( l > 0 )) && ltxt="$l" || ltxt='UL'
- kaizen_ssh_table_row "$u" "$e" "$ltxt"
-done
-kaizen_ssh_table_footer
-read -rp 'Input Username: ' user
-kaizen_is_ssh_account_user "$user" || { echo '[ERROR] SSH account not found.'; exit 1; }
-jq -e --arg u "$user" '.[]|select(.Username==$u)' "$DB" >/dev/null || { echo '[ERROR] Account not found.'; exit 1; }
-old=$(jq -r --arg u "$user" '.[]|select(.Username==$u)|(.LimitIP//0)' "$DB")
-read -rp 'Enter new IP Limit (0 = unlimited): ' new
-[[ "$new" =~ ^[0-9]+$ ]] || { echo '[ERROR] IP limit must be a number.'; exit 1; }
-jq --arg u "$user" --argjson n "$new" 'map(if .Username==$u then .LimitIP=$n else . end)' "$DB" > "$DB.tmp" && mv "$DB.tmp" "$DB"
-echo "$new" > "$DIR/$user"
-kaizen_result_header "SSH IP LIMIT UPDATED"
-printf 'Account  : %s\nPrevious : %s\nNew      : %s\nStatus   : SUCCESS\n' "$user" "$old" "$new"
-
-__KZN_CHANGE_LIMIT_IP_SSH__
-chmod 0755 "$RERE/change-limit-ip-ssh"
-bash -n "$RERE/change-limit-ip-ssh"
-
-[[ -f "$RERE/change-limit-ip-all-ssh" ]] && cp -a "$RERE/change-limit-ip-all-ssh" "$BACKUP/change-limit-ip-all-ssh" || true
-cat > "$RERE/change-limit-ip-all-ssh" <<'__KZN_CHANGE_LIMIT_IP_ALL_SSH__'
-#!/usr/bin/env bash
-source /usr/local/rere/kaizen-ui 2>/dev/null || true
-set -u
-DB=/etc/kaizensc/database/ssh/database.json
-DIR=/etc/kaizensc/limit/ssh/ip
-[[ -s "$DB" ]] || { echo 'No SSH account found.'; exit 0; }
-clear
-kaizen_header " • Edit Limit IP All • "
-kaizen_ssh_table_header
-jq -r '.[]|[.Username,(.Expired//"Lifetime"),(.LimitIP//0)] | @tsv' "$DB" | while IFS=$'\t' read -r u e l; do
- kaizen_is_ssh_account_user "$u" || continue
- [[ "$l" =~ ^[0-9]+$ ]] || l=0
- (( l > 0 )) && ltxt="$l" || ltxt='UL'
- kaizen_ssh_table_row "$u" "$e" "$ltxt"
-done
-kaizen_ssh_table_footer
-read -rp 'New IP Limit for ALL SSH accounts (0 = unlimited): ' new
-[[ "$new" =~ ^[0-9]+$ ]] || { echo '[ERROR] IP limit must be a number.'; exit 1; }
-read -rp "Apply IP Limit $new to all SSH accounts? (y/n): " yn
-[[ "$yn" =~ ^[Yy]$ ]] || { echo 'Cancelled.'; exit 0; }
-jq --argjson n "$new" 'map(.LimitIP=$n)' "$DB" > "$DB.tmp" && mv "$DB.tmp" "$DB"
-mkdir -p "$DIR"
-jq -r '.[].Username' "$DB" | while read -r u; do [[ -n "$u" ]] && echo "$new" > "$DIR/$u"; done
-kaizen_result_header "SSH IP LIMIT ALL UPDATED"
-echo "New Limit : $new"
-echo "Status    : SUCCESS"
-
-__KZN_CHANGE_LIMIT_IP_ALL_SSH__
-chmod 0755 "$RERE/change-limit-ip-all-ssh"
-bash -n "$RERE/change-limit-ip-all-ssh"
-
-[[ -f "$RERE/edit-userpass-ssh" ]] && cp -a "$RERE/edit-userpass-ssh" "$BACKUP/edit-userpass-ssh" || true
-cat > "$RERE/edit-userpass-ssh" <<'__KZN_EDIT_USERPASS_SSH__'
-#!/usr/bin/env bash
-source /usr/local/rere/kaizen-ui 2>/dev/null || true
-set -euo pipefail
-DB="/etc/kaizensc/database/ssh/database.json"
-clear
-kaizen_header " • Edit User/Pass SSH Account • "
-[[ -s "$DB" ]] || { echo "No SSH accounts found."; exit 0; }
-kaizen_ssh_table_header
-jq -r '.[] | [.Username,(.Expired//"Lifetime"),(.LimitIP//0)] | @tsv' "$DB" | while IFS=$'\t' read -r u e l; do
- kaizen_is_ssh_account_user "$u" || continue
- [[ "$l" =~ ^[0-9]+$ ]] || l=0
- (( l > 0 )) && ltxt="$l" || ltxt='UL'
- kaizen_ssh_table_row "$u" "$e" "$ltxt"
-done
-kaizen_ssh_table_footer
-echo
-read -rp 'Username to edit: ' old
-kaizen_is_ssh_account_user "$old" || { echo '[ERROR] SSH account not found.'; exit 1; }
-[[ -n "$old" ]] || exit 0
-row=$(jq -c --arg u "$old" '.[] | select(.Username==$u)' "$DB" | head -n1)
-[[ -n "$row" ]] || { echo "[ERROR] Account not found."; exit 1; }
-read -rp "New Username [$old]: " new
-new=${new:-$old}
-[[ "$new" =~ ^[A-Za-z_][A-Za-z0-9_-]*$ ]] || { echo "[ERROR] Invalid username."; exit 1; }
-if [[ "$new" != "$old" ]] && id "$new" >/dev/null 2>&1; then echo "[ERROR] Username already exists."; exit 1; fi
-read -rsp 'New Password: ' pass; echo
-[[ -n "$pass" ]] || { echo "[ERROR] Password cannot be empty."; exit 1; }
-if [[ "$new" != "$old" ]]; then
-  usermod -l "$new" "$old"
-  if getent passwd "$new" | cut -d: -f6 | grep -qx "/home/$old"; then
-    usermod -d "/home/$new" -m "$new" 2>/dev/null || true
-  fi
-fi
-printf '%s:%s\n' "$new" "$pass" | chpasswd
-tmp=$(mktemp)
-jq --arg old "$old" --arg new "$new" 'map(if .Username==$old then .Username=$new else . end)' "$DB" > "$tmp"
-mv "$tmp" "$DB"
-clear
-kaizen_header " • SSH USER/PASS UPDATED • "
-echo "Previous Username : $old"
-echo "New Username      : $new"
-echo "Password          : UPDATED"
-echo "Status            : SUCCESS"
-
-__KZN_EDIT_USERPASS_SSH__
-chmod 0755 "$RERE/edit-userpass-ssh"
-bash -n "$RERE/edit-userpass-ssh"
 
 [[ -f "$RERE/xray-account" ]] && cp -a "$RERE/xray-account" "$BACKUP/xray-account" || true
 cat > "$RERE/xray-account" <<'__KZN_XRAY_ACCOUNT__'
@@ -937,8 +606,8 @@ list(){
    kaizen_xray_table_row "$user" "${expired%% *}" "$quota_text" "$ip_text"
    rows=$((rows + 1))
  done < <(sqlite3 -separator '|' "$DB" "SELECT email,expired,ip_limit,quota_bytes FROM accounts WHERE protocol='$p' ORDER BY email;")
+ kaizen_xray_table_total_row "$rows"
  kaizen_xray_table_footer
- kaizen_total_users "$rows"
 
  echo
  read -rp 'Enter username to view detailed information (blank = back): ' wanted
@@ -1161,162 +830,4 @@ __KZN_XRAY_ACCOUNT__
 chmod 0755 "$RERE/xray-account"
 bash -n "$RERE/xray-account"
 
-[[ -f "$RERE/cek-login-ssh" ]] && cp -a "$RERE/cek-login-ssh" "$BACKUP/cek-login-ssh" || true
-cat > "$RERE/cek-login-ssh" <<'__KZN_CEK_LOGIN_SSH__'
-#!/usr/bin/env bash
-source /usr/local/rere/kaizen-ui 2>/dev/null || true
-# SSH active-login checker - supports OpenSSH + Dropbear + systemd journal
-
-DB="/etc/kaizensc/database/ssh/database.json"
-IPDIR="/etc/kaizensc/limit/ssh/ip"
-BOT_KEY="/etc/kaizensc/bot/notif/bot.key"
-CHAT_ID="/etc/kaizensc/bot/notif/client.id"
-FLAG="/etc/kaizensc/bot/ssh-login-bot.flag"
-
-telegram_bot_token=$(cat "$BOT_KEY" 2>/dev/null || true)
-telegram_chatid=$(cat "$CHAT_ID" 2>/dev/null || true)
-domain=$(cat /etc/xray/domain 2>/dev/null || hostname -f 2>/dev/null || hostname)
-ipvps=$(cat /root/.ip 2>/dev/null || hostname -I 2>/dev/null | awk '{print $1}')
-
-# Build one authentication snapshot. Debian 12/13 may not have /var/log/auth.log.
-AUTH_TMP=$(mktemp /tmp/ssh-auth.XXXXXX)
-trap 'rm -f "$AUTH_TMP"' EXIT
-{
-    [[ -r /var/log/auth.log ]] && tail -n 20000 /var/log/auth.log
-    [[ -r /var/log/secure ]] && tail -n 20000 /var/log/secure
-    command -v journalctl >/dev/null 2>&1 && journalctl --no-pager -n 20000 \
-        -u ssh.service -u sshd.service -u dropbear.service 2>/dev/null
-} > "$AUTH_TMP"
-
-# Account source MUST be the SSH database, not only the IP-limit directory.
-mapfile -t USERS < <(
-    if [[ -s "$DB" ]] && command -v jq >/dev/null 2>&1; then
-        jq -r '.[].Username // empty' "$DB" 2>/dev/null
-    else
-        awk -F: '$3 >= 1000 && $1 != "nobody" && $7 !~ /(nologin|false)$/ {print $1}' /etc/passwd
-    fi | awk 'NF && !seen[$0]++'
-)
-
-get_ip_limit() {
-    local u=$1 v=""
-    if [[ -s "$DB" ]] && command -v jq >/dev/null 2>&1; then
-        v=$(jq -r --arg u "$u" '.[] | select(.Username==$u) | .LimitIP // 0' "$DB" 2>/dev/null | head -n1)
-    fi
-    [[ -z "$v" || "$v" == "null" ]] && v=$(cat "$IPDIR/$u" 2>/dev/null || echo 0)
-    [[ "$v" =~ ^[0-9]+$ ]] || v=0
-    if (( v == 0 )); then echo "N/A"; else echo "$v"; fi
-}
-
-get_quota_limit() {
-    local u=$1 q=""
-    if [[ -s "$DB" ]] && command -v jq >/dev/null 2>&1; then
-        q=$(jq -r --arg u "$u" '.[] | select(.Username==$u) | .Quota // 0' "$DB" 2>/dev/null | head -n1)
-    fi
-    [[ -z "$q" || "$q" == "null" ]] && q=0
-    if [[ "$q" =~ ^[0-9]+([.][0-9]+)?$ ]] && awk "BEGIN{exit !($q>0)}"; then
-        echo "${q} GB"
-    else
-        echo "N/A"
-    fi
-}
-
-# Count authenticated OpenSSH child sessions. Works for PTY and tunnel-only (@notty) sessions.
-count_openssh() {
-    local u=$1
-    ps -eo args= 2>/dev/null | awk -v p="sshd: ${u}@" 'index($0,p)==1 {n++} END{print n+0}'
-}
-
-# Count active Dropbear child PIDs whose successful-auth log belongs to this user.
-# The master Dropbear PID has no successful-auth line and is therefore ignored.
-count_dropbear() {
-    local u=$1 pid n=0
-    while read -r pid; do
-        [[ -n "$pid" ]] || continue
-        if grep -F "dropbear[$pid]" "$AUTH_TMP" 2>/dev/null | \
-           grep -Ei "(Password auth succeeded|Pubkey auth succeeded|auth succeeded).*['\"]?${u}['\"]?|for ['\"]${u}['\"]" \
-           >/dev/null 2>&1; then
-            n=$((n+1))
-        fi
-    done < <(pgrep -x dropbear 2>/dev/null || true)
-    echo "$n"
-}
-
-# Fallback for interactive sessions if process titles/logging differ on a distro.
-count_who() {
-    local u=$1
-    who 2>/dev/null | awk -v u="$u" '$1==u {n++} END{print n+0}'
-}
-
-clear
-kaizen_header " • Check SSH Login • "
-LOGIN_USER_W=16
-LOGIN_IP_W=2
-while read -r __u; do
-    kaizen_is_ssh_account_user "$__u" || continue
-    __n=${#__u}; (( __n > LOGIN_USER_W )) && LOGIN_USER_W=$__n
-    __lim=$(get_ip_limit "$__u")
-    [[ "$__lim" == "N/A" ]] && __lim='UL'
-    __n=${#__lim}; (( __n > LOGIN_IP_W )) && LOGIN_IP_W=$__n
-done < <(printf '%s\n' "${USERS[@]}")
-
-C=$(kaizen_table_colour); W=$(kaizen_text_colour); Y=$(kaizen_yellow); R=$(kaizen_reset); BG='\e[0;47;30m'
-__a=$(kaizen_repeat_line '─' $((LOGIN_USER_W+2)))
-__l=$(kaizen_repeat_line '─' 12)
-__i=$(kaizen_repeat_line '─' $((LOGIN_IP_W+2)))
-printf '%b┌%s┬%s┬%s┐%b\n' "$C" "$__a" "$__l" "$__i" "$R"
-printf '%b│%b%b %-*s %b%b│%b%b %-10s %b%b│%b%b %-*s %b%b│%b\n' \
-  "$C" "$R" "$BG" "$LOGIN_USER_W" "Username" "$R" "$C" \
-  "$R" "$BG" "Login" "$R" "$C" \
-  "$R" "$BG" "$LOGIN_IP_W" "IP" "$R" "$C" "$R"
-printf '%b├%s┼%s┼%s┤%b\n' "$C" "$__a" "$__l" "$__i" "$R"
-
-aktif=0
-telegram_text="*SSH User Login Report*\nDomain: \`$domain\`\nIP VPS: \`$ipvps\`\n----------------------------------"
-
-for user in "${USERS[@]}"; do
-    [[ -n "$user" ]] || continue
-    kaizen_is_ssh_account_user "$user" || continue
-    os=$(count_openssh "$user")
-    db=$(count_dropbear "$user")
-    wh=$(count_who "$user")
-
-    # who is only a fallback; avoid double-counting the same OpenSSH PTY session.
-    login=$((os + db))
-    (( login == 0 && wh > 0 )) && login=$wh
-    (( login > 0 )) || continue
-
-    limit=$(get_ip_limit "$user"); [[ "$limit" == "N/A" ]] && limit="UL"
-
-    printf '%b│%b %-32.32s %b│%b %-10s %b│%b %-10s %b│%b\n' "$C" "$W" "$user" "$C" "$Y" "$login" "$C" "$W" "$limit" "$C" "$R"
-
-    telegram_text+="\nUser: \`$user\`\nLogin: \`$login / $limit IP\`\n----------------------------------"
-    aktif=$((aktif+1))
-done
-
-if (( aktif == 0 )); then
-    printf '%b│%b %-40s %b│%b\n' "$C" "$W" "No SSH users are currently online." "$C" "$R"
-fi
-printf '%b└──────────────────┴────────────┴────┘%b\n' "$C" "$R"
-printf '%b%s User Online%b\n' "$Y" "$aktif" "$R"
-
-if [[ -f "$FLAG" && $aktif -gt 0 && -n "$telegram_bot_token" && -n "$telegram_chatid" ]]; then
-    telegram_text+="\nTotal Online: \`$aktif User(s)\`"
-    curl -s -X POST "https://api.telegram.org/bot${telegram_bot_token}/sendMessage" \
-        -d "chat_id=$telegram_chatid" -d "parse_mode=Markdown" \
-        --data-urlencode "text=$telegram_text" >/dev/null 2>&1 || true
-fi
-
-__KZN_CEK_LOGIN_SSH__
-chmod 0755 "$RERE/cek-login-ssh"
-bash -n "$RERE/cek-login-ssh"
-
-
-mkdir -p /etc/kaizensc
-[[ -s /etc/kaizensc/text-brightness.conf ]] || printf 'normal\n' > /etc/kaizensc/text-brightness.conf
-
-echo
-echo "Patch installed successfully."
-echo "Backup: $BACKUP"
-echo "Default table widths: Username=16, Expire Date=11, Quota=7, IP=2."
-echo "Columns now auto-expand when account values are longer."
-echo "All previous Never / UL / date-only / brightness fixes are included."
+echo "Patch installed successfully. Backup: $BACKUP"
