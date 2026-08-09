@@ -2,12 +2,11 @@
 set -euo pipefail
 RERE=/usr/local/rere
 STAMP="$(date +%Y%m%d-%H%M%S)"
-BACKUP="/root/kaizensc-multi-fix-backup-${STAMP}"
+BACKUP="/root/kaizensc-unified-expiry-backup-${STAMP}"
 
 [[ ${EUID:-$(id -u)} -eq 0 ]] || { echo "Please run as root."; exit 1; }
 [[ -d "$RERE" ]] || { echo "KaizenSC not found: $RERE"; exit 1; }
 mkdir -p "$BACKUP/rere"
-
 
 [[ -f "$RERE/kaizen-ui" ]] && cp -a "$RERE/kaizen-ui" "$BACKUP/rere/kaizen-ui" || true
 cat > "$RERE/kaizen-ui" <<'__KZN_KAIZEN_UI__'
@@ -213,6 +212,48 @@ kaizen_unlock_table_header(){
 kaizen_unlock_table_row(){ local c w r; c=$(kaizen_table_colour); w=$(kaizen_text_colour); r=$(kaizen_reset); printf '%b│%b %-*s %b│%b %-*s %b│%b %-*s %b│%b\n' "$c" "$w" "$KZN_UNLOCK_USER_W" "$1" "$c" "$w" "$KZN_UNLOCK_EXP_W" "${2%% *}" "$c" "$w" "$KZN_UNLOCK_REASON_W" "${3:-Manual}" "$c" "$r"; }
 kaizen_unlock_table_footer(){ local c r a b d; c=$(kaizen_table_colour); r=$(kaizen_reset); a=$(kaizen_repeat_line '─' $((KZN_UNLOCK_USER_W+2))); b=$(kaizen_repeat_line '─' $((KZN_UNLOCK_EXP_W+2))); d=$(kaizen_repeat_line '─' $((KZN_UNLOCK_REASON_W+2))); printf '%b└%s┴%s┴%s┘%b\n' "$c" "$a" "$b" "$d" "$r"; }
 
+# Unified expiry input helpers used by Create/Extend menus.
+kaizen_rainbow_line(){
+  printf '  '
+  local i
+  for i in {52..57} {57..52}; do printf '\e[38;5;%sm────\e[0m' "$i"; done
+  echo
+}
+kaizen_expiry_help(){
+  local CY='\e[0;36m' W
+  W=$(kaizen_text_colour)
+  echo -e "  ${CY}Example of valid Expired input\e[0m"
+  echo -e "  ${W}- 10                    (meaning 10 days from now)\e[0m"
+  echo -e "  ${W}- 2025-12-01            (means the date with the current time)\e[0m"
+  echo -e "  ${W}- 2025-12-01 15:30:00   (specific date and time)\e[0m"
+}
+# Create: numeric = N days from now.
+# Extend: numeric = N days from current expiry when still active, otherwise from now.
+# Date-only keeps the current clock time. Datetime is exact.
+kaizen_parse_expiry(){
+  local input="$1" base="${2:-}" now_epoch base_epoch target
+  if [[ "$input" =~ ^[1-9][0-9]*$ ]]; then
+    now_epoch=$(date +%s)
+    if [[ -n "$base" ]]; then
+      base_epoch=$(date -d "$base" +%s 2>/dev/null || echo 0)
+      ((base_epoch>now_epoch)) || base_epoch=$now_epoch
+    else
+      base_epoch=$now_epoch
+    fi
+    date -d "@$((base_epoch + input*86400))" '+%F %T'
+    return
+  fi
+  if [[ "$input" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]]; then
+    date -d "$input $(date '+%T')" '+%F %T' 2>/dev/null
+    return
+  fi
+  if [[ "$input" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}[[:space:]][0-9]{2}:[0-9]{2}:[0-9]{2}$ ]]; then
+    date -d "$input" '+%F %T' 2>/dev/null
+    return
+  fi
+  return 1
+}
+
 __KZN_KAIZEN_UI__
 chmod 0755 "$RERE/kaizen-ui"
 bash -n "$RERE/kaizen-ui"
@@ -244,8 +285,7 @@ read -rp 'Input Username: ' user
 kaizen_is_ssh_account_user "$user" || { echo '[ERROR] SSH account not found.'; exit 1; }
 exists=$(jq -r --arg u "$user" '.[]|select(.Username==$u and ((.Locked//false)==false))|.Username' "$DB" | head -1)
 [[ -n "$exists" ]] || { echo -e "${RED}Account not found or already locked.${NC}"; exit 1; }
-read -rp "Reason [Manual]: " reason
-reason=${reason:-Manual}
+reason=Manual
 read -rp "Lock SSH account '$user'? (y/n): " yn
 [[ "$yn" =~ ^[Yy]$ ]] || { echo 'Cancelled.'; exit 0; }
 passwd -l "$user" >/dev/null 2>&1 || usermod -L "$user" >/dev/null 2>&1 || true
@@ -260,90 +300,6 @@ echo "Status  : LOCKED"
 __KZN_LOCK_SSH__
 chmod 0755 "$RERE/lock-ssh"
 bash -n "$RERE/lock-ssh"
-
-[[ -f "$RERE/unlock-ssh" ]] && cp -a "$RERE/unlock-ssh" "$BACKUP/rere/unlock-ssh" || true
-cat > "$RERE/unlock-ssh" <<'__KZN_UNLOCK_SSH__'
-#!/usr/bin/env bash
-source /usr/local/rere/kaizen-ui 2>/dev/null || true
-set -u
-DB=/etc/kaizensc/database/ssh/database.json
-RED='\e[0;31m'; GREEN='\e[0;32m'; NC='\e[0m'
-[[ -s "$DB" ]] || { echo 'No locked SSH account.'; exit 0; }
-jq 'map((if has("Locked") then . else . + {Locked:false} end) | (if has("LockReason") then . else . + {LockReason:""} end))' "$DB" > "$DB.tmp" && mv "$DB.tmp" "$DB"
-count=0
-while read -r u; do kaizen_is_ssh_account_user "$u" && count=$((count+1)); done < <(jq -r '.[]|select((.Locked//false)==true)|.Username' "$DB")
-((count>0)) || { clear; echo 'No locked SSH account.'; exit 0; }
-clear
-kaizen_header " • Unlock SSH Account • "
-KZN_UNLOCK_USER_W=16; KZN_UNLOCK_EXP_W=11; KZN_UNLOCK_REASON_W=10
-while IFS=$'\t' read -r u e reason; do
- kaizen_is_ssh_account_user "$u" || continue; e="${e%% *}"; reason=${reason:-Manual}
- ((${#u}>KZN_UNLOCK_USER_W)) && KZN_UNLOCK_USER_W=${#u}; ((${#e}>KZN_UNLOCK_EXP_W)) && KZN_UNLOCK_EXP_W=${#e}; ((${#reason}>KZN_UNLOCK_REASON_W)) && KZN_UNLOCK_REASON_W=${#reason}
-done < <(jq -r '.[] | select((.Locked//false)==true) | [.Username,(.Expired//"Lifetime"),(.LockReason//"Manual")] | @tsv' "$DB")
-kaizen_unlock_table_header
-while IFS=$'\t' read -r u e reason; do kaizen_is_ssh_account_user "$u" || continue; kaizen_unlock_table_row "$u" "$e" "${reason:-Manual}"; done < <(jq -r '.[] | select((.Locked//false)==true) | [.Username,(.Expired//"Lifetime"),(.LockReason//"Manual")] | @tsv' "$DB")
-kaizen_unlock_table_footer
-read -rp 'Input Username: ' user
-kaizen_is_ssh_account_user "$user" || { echo '[ERROR] SSH account not found.'; exit 1; }
-exists=$(jq -r --arg u "$user" '.[]|select(.Username==$u and ((.Locked//false)==true))|.Username' "$DB" | head -1)
-[[ -n "$exists" ]] || { echo -e "${RED}Locked account not found.${NC}"; exit 1; }
-mapfile -t recent_ips < <(journalctl -u ssh -u sshd --no-pager 2>/dev/null | grep -E "Accepted .* for ${user} " | grep -oE 'from ([0-9a-fA-F:.]+)' | awk '{print $2}' | sort -u)
-usermod -U "$user" >/dev/null 2>&1 || true
-passwd -u "$user" >/dev/null 2>&1 || true
-command -v faillock >/dev/null 2>&1 && faillock --user "$user" --reset >/dev/null 2>&1 || true
-command -v pam_tally2 >/dev/null 2>&1 && pam_tally2 --user "$user" --reset >/dev/null 2>&1 || true
-if command -v fail2ban-client >/dev/null 2>&1; then
-  jails=$(fail2ban-client status 2>/dev/null | sed -n 's/.*Jail list:[[:space:]]*//p')
-  IFS=',' read -ra jail_arr <<< "$jails"
-  for jail in "${jail_arr[@]}"; do
-    jail=$(echo "$jail" | xargs); [[ -n "$jail" ]] || continue
-    for ip in "${recent_ips[@]}"; do fail2ban-client set "$jail" unbanip "$ip" >/dev/null 2>&1 || true; done
-  done
-fi
-jq --arg u "$user" 'map(if .Username==$u then .Locked=false | .LockReason="" else . end)' "$DB" > "$DB.tmp" && mv "$DB.tmp" "$DB"
-mkdir -p /etc/kaizensc/recovery/ssh
-printf '%s\tUNLOCK\t%s\n' "$user" "$(date '+%F %T')" >> /etc/kaizensc/recovery/ssh/recovery.tsv
-kaizen_result_header "SSH ACCOUNT UNLOCKED"
-echo "Account : $user"
-echo "Status  : UNLOCKED"
-echo "Login/IP History : CLEARED"
-
-__KZN_UNLOCK_SSH__
-chmod 0755 "$RERE/unlock-ssh"
-bash -n "$RERE/unlock-ssh"
-
-[[ -f "$RERE/delete-ssh" ]] && cp -a "$RERE/delete-ssh" "$BACKUP/rere/delete-ssh" || true
-cat > "$RERE/delete-ssh" <<'__KZN_DELETE_SSH__'
-#!/usr/bin/env bash
-source /usr/local/rere/kaizen-ui 2>/dev/null || true
-set -u
-DB=/etc/kaizensc/database/ssh/database.json
-[[ -s "$DB" ]] || { echo 'No SSH account found.'; exit 0; }
-clear
-kaizen_header " • Delete SSH Account • "
-kaizen_ssh_table_header
-jq -r '.[]|[.Username,(.Expired//"Lifetime"),(.LimitIP//0)] | @tsv' "$DB" | while IFS=$'\t' read -r u e l; do
- kaizen_is_ssh_account_user "$u" || continue
- [[ "$l" =~ ^[0-9]+$ ]] || l=0
- (( l > 0 )) && ltxt="$l" || ltxt='UL'
- kaizen_ssh_table_row "$u" "$e" "$ltxt"
-done
-kaizen_ssh_table_footer
-read -rp 'Input Username: ' user
-kaizen_is_ssh_account_user "$user" || { echo '[ERROR] SSH account not found.'; exit 1; }
-jq -e --arg u "$user" '.[]|select(.Username==$u)' "$DB" >/dev/null || { echo '[ERROR] Account not found.'; exit 1; }
-read -rp "Delete SSH account '$user'? (y/n): " yn
-[[ "$yn" =~ ^[Yy]$ ]] || { echo 'Cancelled.'; exit 0; }
-userdel -f -r "$user" >/dev/null 2>&1 || true
-rm -f /etc/kaizensc/limit/ssh/{ip,cache,quota,usage}/"$user" 2>/dev/null || true
-jq --arg u "$user" 'map(select(.Username!=$u))' "$DB" > "$DB.tmp" && mv "$DB.tmp" "$DB"
-kaizen_result_header "SSH ACCOUNT DELETED"
-echo "Account : $user"
-echo "Status  : DELETED"
-
-__KZN_DELETE_SSH__
-chmod 0755 "$RERE/delete-ssh"
-bash -n "$RERE/delete-ssh"
 
 [[ -f "$RERE/xray-account" ]] && cp -a "$RERE/xray-account" "$BACKUP/rere/xray-account" || true
 cat > "$RERE/xray-account" <<'__KZN_XRAY_ACCOUNT__'
@@ -541,12 +497,12 @@ create(){
    clear; action_header "Create $(proto_label "$p") Trial Account"
    echo -e "  ${UI_WHITE}Information on adding an account${UI_PLAIN}"
    echo
-   echo -e "  ${UI_WHITE}Example of valid Expired input:${UI_PLAIN}"
-   echo
+   echo -e "  \e[0;36mExample of valid Expired input\e[0m"
    echo -e "  ${UI_WHITE}- 1m  (expired 1 minute)${UI_PLAIN}"
    echo -e "  ${UI_WHITE}- 1h  (expired 1 hour)${UI_PLAIN}"
    echo -e "  ${UI_WHITE}- 1d  (expired 1 day)${UI_PLAIN}"
-   echo -e "  ${UI_CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${UI_PLAIN}"
+   echo
+   kaizen_rainbow_line
    echo
    while true; do
      read -rp '  Expired (1m/1h/1d): ' expin
@@ -566,10 +522,6 @@ create(){
      echo -e "  ${UI_CYAN}Format Limit Quota${UI_PLAIN}"
      echo -e "  ${UI_WHITE}- 0 for unlimited Quota${UI_PLAIN}"
      echo -e "  ${UI_WHITE}- 1 for 1 gb limit quota${UI_PLAIN}"; echo
-     echo -e "  ${UI_CYAN}Example of valid Expired input${UI_PLAIN}"
-     echo -e "  ${UI_WHITE}- 10                    (meaning 10 days from now)${UI_PLAIN}"
-     echo -e "  ${UI_WHITE}- 2025-12-01            (means the date with the current time)${UI_PLAIN}"
-     echo -e "  ${UI_WHITE}- 2025-12-01 15:30:00   (specific date and time)${UI_PLAIN}"; echo
      echo -e "  ${UI_CYAN}Format UUID/Password${UI_PLAIN}"
      echo -e "  ${UI_WHITE}- 1 text                                (auto custom uuid/password)${UI_PLAIN}"
      echo -e "  ${UI_WHITE}- none / space                          (auto random uuid/password)${UI_PLAIN}"
@@ -580,8 +532,12 @@ create(){
      echo -e "  ${UI_CYAN}For this option:-${UI_PLAIN}"
      echo -e "  ${UI_WHITE}-IP Limit : Unlimited${UI_PLAIN}"
      echo -e "  ${UI_WHITE}-Quota GB : Unlimited${UI_PLAIN}"
+     echo
+     kaizen_expiry_help
    fi
-   echo; xray_rainbow; echo
+   echo
+   kaizen_rainbow_line
+   echo
    read -rp '  Email          : ' email
  fi
  [[ -n "$email" ]] || { echo '[ERROR] Email/username cannot be empty.'; return 1; }
@@ -590,13 +546,22 @@ create(){
  if [[ "$mode" == custom ]]; then
    [[ -z $ip ]] && read -rp '  IP Limit       : ' ip
    [[ -z $qgb ]] && read -rp '  Quota GB       : ' qgb
+   echo
+   kaizen_expiry_help
+   echo
+   kaizen_rainbow_line
+   echo
  elif [[ "$mode" == normal ]]; then
    ip=0; qgb=0
  fi
  [[ -z $expin ]] && read -rp '  Expired        : ' expin
  local exp
- if [[ "$expin" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]]; then exp=$(date -d "$expin $(date '+%T')" '+%F %T' 2>/dev/null); else exp=$(expire_parse "$expin"); fi
- [[ -n "${exp:-}" ]] || { echo '[ERROR] Invalid expiry.'; return 1; }
+ if [[ "$mode" == trial ]]; then
+   exp=$(expire_parse "$expin")
+ else
+   exp=$(kaizen_parse_expiry "$expin" 2>/dev/null)
+ fi
+ [[ -n "${exp:-}" ]] || { echo '[ERROR] Invalid expiry. Use 10, YYYY-MM-DD, or YYYY-MM-DD HH:MM:SS.'; return 1; }
  local cred="$supplied_cred" input
  if [[ -z "$cred" && "$mode" == custom ]]; then
    read -rp '  UUID/Password  : ' input
@@ -754,7 +719,7 @@ unlock_account(){
  clear_account_login_state "$p" "$e"
  result_header "$(proto_label "$p") ACCOUNT UNLOCKED"; echo "Account : ${e%@*}"; echo "Status  : UNLOCKED"; echo "Login/IP History : CLEARED"
 }
-lock_menu(){ local p=$1 reason ans; select_simple "$p" 'Enter username to lock: ' unlocked || return; read -rp 'Reason [Manual]: ' reason; reason=${reason:-Manual}; read -rp "Lock $(proto_label "$p") account '${CHOSEN%@*}'? (y/n): " ans; [[ "$ans" =~ ^[Yy]$ ]] || { echo 'Cancelled.'; return; }; lock_account "$p" "$CHOSEN" "$reason"; }
+lock_menu(){ local p=$1 ans; select_simple "$p" 'Enter username to lock: ' unlocked || return; read -rp "Lock $(proto_label "$p") account '${CHOSEN%@*}'? (y/n): " ans; [[ "$ans" =~ ^[Yy]$ ]] || { echo 'Cancelled.'; return; }; lock_account "$p" "$CHOSEN" 'Manual'; }
 unlock_menu(){ local p=$1; select_simple "$p" 'Enter username to unlock: ' locked || return; unlock_account "$p" "$CHOSEN"; }
 delete_permanent(){
  local p=$1 e=${2:-} ans; if [[ -z "$e" ]]; then select_simple "$p" 'Enter username to delete: ' || return; e=$CHOSEN; fi; read -rp "Delete ${e%@*}? [y/N]: " ans; [[ "$ans" =~ ^[Yy]$ ]] || { echo 'Cancelled.'; return; }
@@ -762,29 +727,23 @@ delete_permanent(){
 }
 choose(){ local p=$1; select_simple "$p" 'Enter username: '; }
 extend(){
- local p=$1 wanted old answer custom days new base now
+ local p=$1 wanted old expin new
  simple_list "$p" || return 1
+ echo
+ kaizen_expiry_help
+ echo
+ kaizen_rainbow_line
+ echo
  read -rp 'Enter username to extend: ' wanted
  [[ -n "$wanted" ]] || return 1
  CHOSEN=$(resolve_account "$p" "$wanted"); [[ -n "$CHOSEN" ]] || { echo '[ERROR] Account not found.'; return 1; }
  old=$(sqlite3 "$DB" "SELECT expired FROM accounts WHERE protocol='$p' AND email='$CHOSEN';")
  [[ -n "$old" ]] || { echo '[ERROR] Account not found.'; return 1; }
- read -rp 'Use custom expired date? (y/n): ' answer
- if [[ "$answer" =~ ^[Yy]$ ]]; then
-   read -rp 'Custom expired (YYYY-MM-DD): ' custom
-   [[ "$custom" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]] || { echo '[ERROR] Use format YYYY-MM-DD.'; return 1; }
-   new=$(date -d "$custom $(date '+%T')" '+%F %T' 2>/dev/null) || { echo '[ERROR] Invalid date.'; return 1; }
- else
-   read -rp 'Extend (days): ' days
-   [[ "$days" =~ ^[0-9]+$ && "$days" -gt 0 ]] || { echo '[ERROR] Days must be greater than 0.'; return 1; }
-   now=$(date '+%F %T')
-   local old_epoch now_epoch base_epoch new_epoch
-   old_epoch=$(date -d "$old" +%s 2>/dev/null) || { echo '[ERROR] Invalid current expiry date.'; return 1; }
-   now_epoch=$(date -d "$now" +%s 2>/dev/null) || return 1
-   if (( old_epoch > now_epoch )); then base_epoch=$old_epoch; else base_epoch=$now_epoch; fi
-   new_epoch=$((base_epoch + (days * 86400)))
-   new=$(date -d "@$new_epoch" '+%F %T') || return 1
- fi
+ while true; do
+   read -rp 'Expired: ' expin
+   new=$(kaizen_parse_expiry "$expin" "$old" 2>/dev/null) && [[ -n "$new" ]] && break
+   echo '[ERROR] Invalid expiry. Use 10, YYYY-MM-DD, or YYYY-MM-DD HH:MM:SS.'
+ done
  sqlite3 "$DB" "UPDATE accounts SET expired='$new' WHERE protocol='$p' AND email='$CHOSEN';"
  result_header "$(proto_label "$p") ACCOUNT EXTENDED"; echo "Account      : ${CHOSEN%@*}"; echo "Previous     : $old"; echo "New Expiry   : $new"; echo 'Status       : SUCCESS'
 }
@@ -898,229 +857,764 @@ __KZN_XRAY_ACCOUNT__
 chmod 0755 "$RERE/xray-account"
 bash -n "$RERE/xray-account"
 
-[[ -f "$RERE/detail" ]] && cp -a "$RERE/detail" "$BACKUP/rere/detail" || true
-cat > "$RERE/detail" <<'__KZN_DETAIL__'
+[[ -f "$RERE/addssh" ]] && cp -a "$RERE/addssh" "$BACKUP/rere/addssh" || true
+cat > "$RERE/addssh" <<'__KZN_ADDSSH__'
 #!/usr/bin/env bash
 source /usr/local/rere/kaizen-ui 2>/dev/null || true
-CYAN='\e[0;36m'; WHITE='\e[0;97m'; GREEN='\e[0;32m'; plain='\e[0m'
-clear; echo; kaizen_header ' • PORT & PROTOCOL DETAIL • '
-echo -e "${CYAN}  SSH / VPN${plain}"
-echo -e "${WHITE}  OpenSSH                  : ${GREEN}22${plain}"
-echo -e "${WHITE}  Dropbear                 : ${GREEN}111${plain}"
-echo -e "${WHITE}  SSH WebSocket Non-TLS    : ${GREEN}80, 2080, 2082, 8000, 8080, 8880${plain}"
-echo -e "${WHITE}  SSH WebSocket TLS        : ${GREEN}443, 8443${plain}"
-echo -e "${WHITE}  OpenVPN TCP / UDP        : ${GREEN}1194 / 2200${plain}"
-echo -e "${WHITE}  SOCKS5                   : ${GREEN}1080${plain}"
-echo -e "${WHITE}  HTTP Proxy               : ${GREEN}3128${plain}"
-echo -e "${WHITE}  UDP Custom               : ${GREEN}1-65535${plain}"
-echo -e "${WHITE}  BadVPN/UDPGW             : ${GREEN}7100-7900${plain}"
+
+# === COLOUR ===
+export red='\033[0;31m'
+export NC='\033[0m'
+export cyan='\e[0;36m'
+export green='\e[0;32m'
+RED='\e[0;31m'
+GREEN='\e[0;32m'
+YELLOW='\e[0;33m'
+CYAN="\e[0;36m"
+WHITE='\e[0;97m'
+red='\e[0;31m'
+green='\e[0;32m'
+yellow='\e[0;33m'
+cyan="\e[0;36m"
+white='\e[0;97m'
+plain='\e[0m'
+bgPutih="\e[0;47;30m"
+keatas="${CYAN}│${plain}"
+keatas2="${CYAN}║${plain}"
+
+# === RAINBOW LINE ===
+function cmd()
+{
+  printf "  "
+  for i in {52..57} {57..52}
+  do
+  printf "\e[38;5;${i}m────\e[0m"
+  done
+  echo
+}
+
+# Function to URL-encode username and password
+url_encode() {
+    local raw="$1"
+    local encoded=""
+    for (( i=0; i<${#raw}; i++ )); do
+        char="${raw:i:1}"
+        case "$char" in
+            [a-zA-Z0-9._~-]) encoded+="$char" ;;
+            *) encoded+=$(printf '%%%02X' "'$char") ;;
+        esac
+    done
+    echo "$encoded"
+}
+
+# Information
+domain=$(cat /etc/xray/domain)
+database="/etc/kaizensc/database/ssh/database.json"
+isp=$(cat /root/.isp)
+region=$(cat /root/.region)
+nameserver=$(cat /etc/kaizensc/slowdns/nameserver)
+pubkey=$(cat /etc/kaizensc/slowdns/server.pub)
+telegram_bot_token=$(cat /etc/kaizensc/bot/notif/bot.key)
+telegram_chatid=$(cat /etc/kaizensc/bot/notif/client.id)
+IPVPS=$(cat /root/.ip)
+
+# Check SlowDNS Tunnel
+if [[ -f /etc/kaizensc/slowdns/nameserver ]]; then
+    dns_info_telegram="<b>───────────────</b>
+<b>DNSTT</b>
+<b>Nameserver:</b> <code>$nameserver</code>
+<b>Publik Key:</b> <code>$pubkey</code>
+<b>Port DNSTT:</b> <code>5300, 53, 443, 7000, 2053, 25000</code>"
+    
+    dns_info_output="║ DNSTT
+║ Nameserver: $nameserver
+║ Publik Key: $pubkey
+║ Port DNSTT: 5300, 53, 443, 7000, 2053, 25000"
+else
+    dns_info_telegram=""
+    dns_info_output=""
+fi
+
+# Check Argo Tunnel
+if [[ -f /etc/xray/domargo ]]; then
+    domargo=$(cat /etc/xray/domargo)
+    argo_info_telegram="<b>───────────────</b>
+<b>ARGO TUNNEL</b>
+<b>Domain:</b> <code>$domargo</code>
+<b>Port TLS (Cloudflare):</b> <code>443, 8443, 2053, 2083, 2087, 2096</code>
+<b>Port HTTP (Cloudflare):</b> <code>80, 8080, 8880, 2052, 2086, 2095</code>"
+    
+    argo_info_output="║ ARGO TUNNEL
+║ Domain: $domargo
+║ Port TLS (Cloudflare): 443, 8443, 2053, 2083, 2087, 2096
+║ Port HTTP (Cloudflare): 80, 8080, 8880, 2052, 2086, 2095"
+else
+    argo_info_telegram=""
+    argo_info_output=""
+fi
+
+# Create account
+clear
+kaizen_header " • Create SSH Account • "
+echo -e ""
+echo -e "  ${white}Information on adding an account${plain}"
+echo -e ""
+echo -e "  ${CYAN}Format Limit IP login${plain}"
+echo -e "  ${white}- 0 for unlimited login${plain}"
+echo -e "  ${white}- 1 for 1 limit login${plain}"
 echo
-echo -e "${CYAN}  XRAY SHARED TLS ENTRY${plain}"
-echo -e "${WHITE}  Vless/Vmess/Trojan       : ${GREEN}443, 8443, 8999, 9443, 9755, 400-777${plain}"
+kaizen_expiry_help
 echo
-echo -e "${CYAN}  XRAY SHARED NON-TLS ENTRY${plain}"
-echo -e "${WHITE}  Vless/Vmess/Trojan       : ${GREEN}80-108, 8000, 8080-8180, 8880,${plain}"
-echo -e "${WHITE}                             ${GREEN}2084-2085, 2088-2094, 2097-2199${plain}"
+kaizen_rainbow_line
 echo
-echo -e "${CYAN}  XRAY TCP HTTP DEDICATED${plain}"
-echo -e "${WHITE}  Vless TCP TLS/Non-TLS    : ${GREEN}2083 / 2082${plain}"
-echo -e "${WHITE}  Vmess TCP TLS/Non-TLS    : ${GREEN}2087 / 2086${plain}"
-echo -e "${WHITE}  Trojan TCP TLS/Non-TLS   : ${GREEN}2096 / 2095${plain}"
-echo
-echo -e "${CYAN}  XRAY PATH / SERVICE${plain}"
-echo -e "${WHITE}  Vless WS Multipath       : ${GREEN}/${plain}"
-echo -e "${WHITE}  Vless WS                 : ${GREEN}/vless${plain}"
-echo -e "${WHITE}  Vless HTTPUpgrade        : ${GREEN}/hu-vless${plain}"
-echo -e "${WHITE}  Vless XHTTP              : ${GREEN}/xhttpvl${plain}"
-echo -e "${WHITE}  Vless gRPC               : ${GREEN}vless-grpc${plain}"
-echo -e "${WHITE}  Vmess WS                 : ${GREEN}/vmess${plain}"
-echo -e "${WHITE}  Vmess HTTPUpgrade        : ${GREEN}/hu-vmess${plain}"
-echo -e "${WHITE}  Vmess XHTTP              : ${GREEN}/xhttpvm${plain}"
-echo -e "${WHITE}  Vmess gRPC               : ${GREEN}vmess-grpc${plain}"
-echo -e "${WHITE}  Trojan WS                : ${GREEN}/trojan${plain}"
-echo -e "${WHITE}  Trojan HTTPUpgrade       : ${GREEN}/hu-trojan${plain}"
-echo -e "${WHITE}  Trojan XHTTP             : ${GREEN}/xhttptr${plain}"
-echo -e "${WHITE}  Trojan gRPC              : ${GREEN}trojan-grpc${plain}"
-echo -e "${WHITE}  TCP HTTP                 : ${GREEN}/${plain}"
 
-__KZN_DETAIL__
-chmod 0755 "$RERE/detail"
-bash -n "$RERE/detail"
-
-[[ -f "$RERE/menu-system" ]] && cp -a "$RERE/menu-system" "$BACKUP/rere/menu-system" || true
-cat > "$RERE/menu-system" <<'__KZN_MENU_SYSTEM__'
-#!/usr/bin/env bash
-source /usr/local/rere/kaizen-ui 2>/dev/null || true
-RED='\e[0;31m'; GREEN='\e[0;32m'; YELLOW='\e[0;33m'; CYAN='\e[0;36m'; WHITE='\e[0;97m'; plain='\e[0m'; bgPutih='\e[0;47;30m'; keatas="${CYAN}│${plain}"
-cmd(){ printf '  '; local i; for i in {52..57} {57..52}; do printf "\e[38;5;${i}m────\e[0m"; done; echo; }
-invalid(){ echo; echo -e "${RED}Invalid option, please try again!${plain}"; sleep 1; }
-header(){ clear; echo; if declare -F kaizen_header >/dev/null; then kaizen_header " • $1 • "; else echo -e "${CYAN}┌─────────────────────────────────────────────────┐${plain}"; printf "${CYAN}│${plain}${bgPutih}%49s${plain}${CYAN}│${plain}\n" " $1"; echo -e "${CYAN}└─────────────────────────────────────────────────┘${plain}"; fi; }
-result_title(){ header "$1"; }
-
-change_banner(){
- result_title 'CHANGE SSH BANNER'
- read -rp 'Input your SSH banner: ' bns
- printf '%s\n' "$bns" > /etc/issue.net
- systemctl daemon-reload
- for s in ssh sshd dropbear ws-stunnel multiplex ws-dual; do systemctl cat "$s" >/dev/null 2>&1 && systemctl restart "$s" >/dev/null 2>&1 || true; done
- echo -e "${GREEN}SSH banner updated successfully.${plain}"
-}
-
-system_status(){
- result_title 'SYSTEM STATUS'
- local uptime_text cpu_load ram_total ram_used ram_pct disk_total disk_used disk_pct
- uptime_text=$(uptime -p 2>/dev/null | sed 's/^up //' || echo '-')
- cpu_load=$(awk '{print $1" / "$2" / "$3}' /proc/loadavg 2>/dev/null || echo '-')
- ram_total=$(free -m | awk '/^Mem:/ {print $2}')
- ram_used=$(free -m | awk '/^Mem:/ {print $3}')
- if [[ ${ram_total:-0} -gt 0 ]]; then ram_pct=$((ram_used*100/ram_total)); else ram_pct=0; fi
- read -r disk_total disk_used disk_pct < <(df -h / | awk 'NR==2 {print $2, $3, $5}')
- echo -e "${WHITE}  Uptime      : ${GREEN}${uptime_text:-'-'}${plain}"
- echo -e "${WHITE}  CPU Load    : ${GREEN}${cpu_load:-'-'}${plain}"
- echo -e "${WHITE}  RAM Usage   : ${GREEN}${ram_used:-0} MB / ${ram_total:-0} MB (${ram_pct}%)${plain}"
- echo -e "${WHITE}  SSD Usage   : ${GREEN}${disk_used:-'-'} / ${disk_total:-'-'} (${disk_pct:-'-'})${plain}"
- echo -e "${WHITE}  CPU Cores   : ${GREEN}$(nproc 2>/dev/null || echo '-')${plain}"
- echo -e "${WHITE}  Kernel      : ${GREEN}$(uname -r)${plain}"
-}
-
-restart_all(){
- result_title 'RESTART ALL SERVICE'
- echo -e "${WHITE}Restarting installed services...${plain}"; echo
- services=(ssh sshd dropbear multiplex ws-stunnel ws-dual cron xray-vless xray-vmess xray-trojan haproxy sslh nginx openvpn dnstt udp-custom api v2ray xray-quota@vless xray-quota@vmess xray-quota@trojan)
- for s in "${services[@]}"; do
-   if systemctl cat "$s" >/dev/null 2>&1; then
-     if systemctl restart "$s" >/dev/null 2>&1; then printf "${GREEN}[OK]${plain}   ${WHITE}%s${plain}\n" "$s"; else printf "${RED}[FAIL]${plain} ${WHITE}%s${plain}\n" "$s"; fi
-   fi
- done
- [[ -f /etc/xray/domargo ]] && systemctl cat cloudflared >/dev/null 2>&1 && systemctl restart cloudflared >/dev/null 2>&1 || true
-}
-
-choose_region(){
- local region=$1 zones choice
- mapfile -t zones < <(timedatectl list-timezones | grep -E "^${region}/")
- ((${#zones[@]}>0)) || { result_title 'CHANGE TIMEZONE'; echo -e "${RED}No timezone found.${plain}"; return; }
- while true; do
-   header "${region} TIMEZONES"
-   local i; for i in "${!zones[@]}"; do printf "  ${CYAN}[%02d]${plain} ${WHITE}%s${plain}\n" "$((i+1))" "${zones[$i]}"; done
-   cmd; echo -e "  ${CYAN}[ x]${plain} ${WHITE}Back${plain}"; cmd; echo
-   read -rp " $(echo -e "${WHITE}Select timezone:${plain} ")" choice
-   [[ "$choice" =~ ^[Xx]$ ]] && return
-   if [[ "$choice" =~ ^[0-9]+$ ]] && ((choice>=1 && choice<=${#zones[@]})); then
-     timedatectl set-timezone "${zones[$((choice-1))]}" && { result_title 'TIMEZONE UPDATED'; echo -e "${GREEN}Timezone changed to ${zones[$((choice-1))]}.${plain}"; }; return
-   fi
-   invalid
- done
-}
-
-change_timezone(){
- while true; do
-  header 'CHANGE TIMEZONE'
-  echo -e "  ${CYAN}[01]${plain} ${WHITE}Africa${plain}"
-  echo -e "  ${CYAN}[02]${plain} ${WHITE}America${plain}"
-  echo -e "  ${CYAN}[03]${plain} ${WHITE}Antarctica${plain}"
-  echo -e "  ${CYAN}[04]${plain} ${WHITE}Asia${plain}"
-  echo -e "  ${CYAN}[05]${plain} ${WHITE}Atlantic${plain}"
-  echo -e "  ${CYAN}[06]${plain} ${WHITE}Australia${plain}"
-  echo -e "  ${CYAN}[07]${plain} ${WHITE}Europe${plain}"
-  echo -e "  ${CYAN}[08]${plain} ${WHITE}Indian${plain}"
-  echo -e "  ${CYAN}[09]${plain} ${WHITE}Pacific${plain}"
-  echo -e "  ${CYAN}[10]${plain} ${WHITE}View Current Time Zone${plain}"
-  cmd; echo -e "  ${CYAN}[ x]${plain} ${WHITE}Back${plain}"; cmd; echo
-  read -rp " $(echo -e "${WHITE}Please select an option [01-10 or x]:${plain} ")" opt
-  case "$opt" in
-   1|01) choose_region Africa;; 2|02) choose_region America;; 3|03) choose_region Antarctica;; 4|04) choose_region Asia;;
-   5|05) choose_region Atlantic;; 6|06) choose_region Australia;; 7|07) choose_region Europe;; 8|08) choose_region Indian;; 9|09) choose_region Pacific;;
-   10) result_title 'CURRENT TIMEZONE'; timedatectl; read -rp 'Press Enter to continue...' _;; x|X) return;; *) invalid;;
-  esac
- done
-}
-
-MREINSTALL_URL='https://raw.githubusercontent.com/rewasu91/Management-System/refs/heads/main/mreinstall'
-MREINSTALL_FILE='/root/mreinstall'
-
-rebuild_vps(){
- result_title 'REINSTALL / REBUILD VPS'
- echo -e "${WHITE}Downloading latest VPS reinstall manager...${plain}"
- echo
-
- if ! curl -fL --retry 3 --retry-delay 2 --connect-timeout 10 --max-time 60 \
-   "$MREINSTALL_URL" -o "$MREINSTALL_FILE"; then
-   echo
-   echo -e "${RED}Failed to download VPS reinstall manager.${plain}"
-   echo -e "${WHITE}Source:${plain}"
-   echo -e "${CYAN}${MREINSTALL_URL}${plain}"
-   echo
-   read -rp 'Press Enter to continue...' _
-   return
- fi
-
- if [[ ! -s "$MREINSTALL_FILE" ]]; then
-   echo -e "${RED}Downloaded reinstall manager is empty.${plain}"
-   rm -f "$MREINSTALL_FILE"
-   read -rp 'Press Enter to continue...' _
-   return
- fi
-
- chmod 700 "$MREINSTALL_FILE"
-
- if ! bash -n "$MREINSTALL_FILE"; then
-   echo
-   echo -e "${RED}Downloaded reinstall manager failed Bash syntax validation.${plain}"
-   read -rp 'Press Enter to continue...' _
-   return
- fi
-
- clear
- bash "$MREINSTALL_FILE"
- local rc=$?
-
- if (( rc != 0 )); then
-   echo
-   echo -e "${YELLOW}Reinstall manager exited with status ${rc}.${plain}"
-   read -rp 'Press Enter to continue...' _
-   return
- fi
-
- result_title 'REINSTALL PREPARED'
- echo -e "${GREEN}Reinstall setup completed successfully.${plain}"
- echo -e "${YELLOW}VPS will reboot automatically in 5 seconds...${plain}"
- sync
- sleep 5
- systemctl reboot || reboot
-}
-
+# Input Username and check availability
 while true; do
- header 'MENU SYSTEM VPS'
- echo -e "  ${CYAN}[01]${plain} ${WHITE}Domain Manager${plain}"
- echo -e "  ${CYAN}[02]${plain} ${WHITE}Backup Manager${plain}"
- echo -e "  ${CYAN}[03]${plain} ${WHITE}Change Timezone${plain}"
- echo -e "  ${CYAN}[04]${plain} ${WHITE}Restart All Service${plain}"
- echo -e "  ${CYAN}[05]${plain} ${WHITE}Adjust Text Brightness${plain}"
- echo -e "  ${CYAN}[06]${plain} ${WHITE}Check Streaming Country Status${plain}"
- echo -e "  ${CYAN}[07]${plain} ${WHITE}Menu Bot Manager${plain}"
- echo -e "  ${CYAN}[08]${plain} ${WHITE}ON/OFF IPV6${plain}"
- echo -e "  ${CYAN}[09]${plain} ${WHITE}Reinstall / Rebuild VPS${plain}"
- echo -e "  ${CYAN}[10]${plain} ${WHITE}Check Detail Port & Protocol${plain}"
- echo -e "  ${CYAN}[11]${plain} ${WHITE}Check Status: Uptime, CPU, RAM & SSD${plain}"
- echo -e "  ${CYAN}[12]${plain} ${WHITE}Setup Cloudflare Argo Tunnel Routing${plain}"
- echo -e "  ${CYAN}[13]${plain} ${WHITE}Change SSH Banner${plain}"
- echo -e "  ${CYAN}[14]${plain} ${WHITE}Setup Service (ON/OFF)${plain}"
- echo -e "  ${CYAN}[15]${plain} ${WHITE}Menu API / REST API Support${plain}"
- echo -e "  ${CYAN}[16]${plain} ${WHITE}Menu Admin VPS${plain}"
- echo -e "  ${CYAN}[17]${plain} ${WHITE}Back to Main Menu${plain}"
- cmd; echo -e "  ${CYAN}[ x]${plain} ${WHITE}Exit${plain}"; cmd; echo
- read -rp " $(echo -e "${WHITE}Please select an option [01-17 or x]:${plain} ")" asu
- case "$asu" in
-  1|01) menu-domain;; 2|02) bmenu;; 3|03) change_timezone;; 4|04) restart_all; read -rp 'Press Enter to continue...' _;;
-  5|05) adjust-text-brightness; exec menu-system;; 6|06) check-streaming-country;; 7|07) bot-menu;; 8|08) ipv6-control;; 9|09) rebuild_vps;;
-  10) detail; read -rp 'Press Enter to continue...' _;; 11) system_status; read -rp 'Press Enter to continue...' _;; 12) menu-argo;; 13) change_banner; read -rp 'Press Enter to continue...' _;; 14) fn-sc1;; 15) menu-api;; 16) menu-admin;; 17) exec menu;;
-  x|X) clear; exit 0;; *) invalid;;
- esac
+    read -p "  Username       : " Login
+    # Cek di database
+    if grep -qw "\"Username\":\s*\"$Login\"" "$database"; then
+        # Username exists
+        echo -e " ${RED}Username taken. Please use another username.${plain}"
+    else
+        # Username available
+        echo -e "  ${GREEN}Username available.${plain}"
+        break
+    fi
 done
 
-__KZN_MENU_SYSTEM__
-chmod 0755 "$RERE/menu-system"
-bash -n "$RERE/menu-system"
+read -p "  Password       : " Pass
+read -p "  IP Limit       : " iplimit
+quota=0
+while true; do
+    read -rp "  Expired        : " masaaktif
+    expi=$(kaizen_parse_expiry "$masaaktif" 2>/dev/null) && [[ -n "$expi" ]] && break
+    echo -e "  ${RED}Invalid expiry. Use 10, YYYY-MM-DD, or YYYY-MM-DD HH:MM:SS.${plain}"
+done
+
+clear
+
+# Create folder if it does not exist
+mkdir -p /etc/kaizensc/limit/ssh/ip
+mkdir -p $(dirname "$database")
+
+# Save quota limit & IP if provided
+#[[ $quota -gt 0 ]] && echo -e "$((quota * 1024 * 1024 * 1024))" > "/etc/kaizensc/limit/ssh/quota/$Login"
+[[ $iplimit -gt 0 ]] && echo -e "$iplimit" > "/etc/kaizensc/limit/ssh/ip/$Login"
+
+# Ensure JSON file exists
+if [[ ! -f "$database" ]]; then
+    echo "[]" > "$database"
+fi
+
+# Create SSH account. Linux chage uses date-only; the KaizenSC database keeps
+# the exact datetime so xp-ssh can expire at the requested time.
+ssh_chage_date=$(date -d "${expi%% *} +1 day" +%F)
+sudo useradd --shell /usr/sbin/nologin "$Login" -e "$ssh_chage_date"
+echo "$Login:$Pass" | sudo chpasswd
+echo -e "$Pass\n$Pass" | passwd "$Login" &> /dev/null
+
+hariini=$(date -d "0 days" +"%Y-%m-%d")
+
+# Save to JSON database
+jq --arg user "$Login" --arg pass "$Pass" --arg ip "$iplimit" --arg quota "$quota" --arg exp "$expi" \
+    '. += [{"Username": $user, "Password": $pass, "LimitIP": $ip, "Quota": $quota, "Expired": $exp, "Locked": false}]' \
+    "$database" > "${database}.tmp" && mv "${database}.tmp" "$database"
+
+#Socks5 Detail
+proxy_ip=$(hostname -I | awk '{print $1}')
+encoded_username=$(url_encode "$Login")
+encoded_password=$(url_encode "$Pass")
+clear
+
+# Send notification to Telegram bot
+TEKS="
+<b>───────────────</b>
+<b> SSH ACCOUNT DETAILS </b>
+<b>───────────────</b>
+<b> Hostname   :</b> <code>$domain</code> / <code>$IPVPS</code>
+<b> Wildcard   :</b> <code>bug.com.${domain}</code>
+<b> Username   :</b> <code>$Login</code>
+<b> Password   :</b> <code>$Pass</code>
+<b> ISP        :</b> <code>$isp</code>
+<b> Region     :</b> <code>$region</code>
+<b>───────────────</b>
+<b> WS Ports   :</b> <code>80-108,2082,8000,8080-8180,2084-2199</code>
+<b> TLS/SSL    :</b> <code>443,8443,8999,9443,9755,400-777</code>
+<b> UDP Custom :</b> <code>1-65535</code>
+<b> HTTP Proxy :</b> <code>3128</code>
+<b> OpenVPN    :</b> <code>1194/2200</code>
+${argo_info_telegram}
+<b>───────────────</b>
+<b> Socks5     :</b>
+<code>socks5://${encoded_username}:${encoded_password}@${proxy_ip}:1080</code>
+${dns_info_telegram}
+<b>───────────────</b>
+<b> HTTP Custom :</b>
+<code>${domain}:1-65535@${Login}:${Pass}</code>
+<b>───────────────</b>
+<b> Limit IP    :</b> <code>$iplimit</code>
+<b> Payload WS  :</b>
+<code>GET /ssh HTTP/1.1[crlf]Host:${domain}[crlf]Upgrade:websocket[crlf][crlf]</code>
+<b>───────────────</b>
+<b> OpenVPN     :</b> <a href=\"https://$domain/fn/index.html\">https://$domain/fn/index.html</a>
+<b>───────────────</b>
+<b> Expired On  :</b> <code>$expi</code>
+<b>───────────────</b>
+"
+
+curl -s -X POST "https://api.telegram.org/bot$telegram_bot_token/sendMessage" \
+    -d "chat_id=$telegram_chatid" \
+    -d "parse_mode=HTML" \
+    -d "text=${TEKS}" > /dev/null
+
+# Account information output
+clear
+echo -e ""
+echo -e "${CYAN}╔════════════════════════════════════════════════════════════╗${plain}"
+echo -e "${keatas2} ${bgPutih}               • SSH Account Information •                ${plain} ${keatas2}"
+echo -e "${CYAN}╠════════════════════════════════════════════════════════════╣${plain}"
+echo -e "${CYAN}║${plain} ${white}Hostname        : $domain | $IPVPS${plain}"
+echo -e "${CYAN}║${plain} ${white}Username        : $Login${plain}"
+echo -e "${CYAN}║${plain} ${white}Password        : $Pass${plain}"
+echo -e "${CYAN}║${plain} ${white}ISP Server      : $isp${plain}"
+echo -e "${CYAN}║${plain} ${white}Region Server   : $region${plain}"
+echo -e "${CYAN}╠────────────────────────────────────────────────────────────╣${plain}"
+echo -e "${CYAN}║${plain} ${white}Port WebSocket  : 80, 2080, 2082, 8000, 8080, 8880${plain}"
+echo -e "${CYAN}║${plain} ${white}Port TLS/SSL    : 443, 8443${plain}"
+echo -e "${CYAN}║${plain} ${white}Port UDP Custom : 1-65535${plain}"
+echo -e "${CYAN}║${plain} ${white}Port HTTP Proxy : 3128 (Limit Access)${plain}"
+echo -e "${CYAN}║${plain} ${white}Port OpenVPN    : 1194 / 2200${plain}"
+echo -e "${CYAN}╠────────────────────────────────────────────────────────────╣${plain}"
+if [[ -n "$argo_info_output" ]]; then
+    echo -e "$argo_info_output"
+    echo -e "${CYAN}╠────────────────────────────────────────────────────────────╣${plain}"
+fi
+echo -e "${CYAN}║${plain} ${white}Socks5          : socks5://${encoded_username}:${encoded_password}@${domain}:1080${plain}"
+if [[ -n "$dns_info_output" ]]; then
+    echo -e "${CYAN}╠────────────────────────────────────────────────────────────╣${plain}"
+    echo -e "$dns_info_output"
+fi
+echo -e "${CYAN}╠────────────────────────────────────────────────────────────╣${plain}"
+echo -e "${CYAN}║${plain} ${white}HTTP Custom    : ${domain}:1-65535@${Login}:${Pass}${plain}"
+echo -e "${CYAN}╠────────────────────────────────────────────────────────────╣${plain}"
+echo -e "${CYAN}║${plain} ${white}Limit IP       : $iplimit${plain}"
+echo -e "${CYAN}║${plain} ${white}Payload WS     : GET /ssh HTTP/1.1[crlf]Host: ${domain}[crlf]Upgrade: websocket[crlf][crlf]${plain}"
+echo -e "${CYAN}╠────────────────────────────────────────────────────────────╣${plain}"
+echo -e "${CYAN}║${plain} ${white}OpenVPN        : https://$domain/fn/index.html${plain}"
+echo -e "${CYAN}╠────────────────────────────────────────────────────────────╣${plain}"
+echo -e "${CYAN}║${plain} ${white}Expired On${plain}     : ${GREEN}$expi${plain}"
+echo -e "${CYAN}╚════════════════════════════════════════════════════════════╝${plain}"
+
+__KZN_ADDSSH__
+chmod 0755 "$RERE/addssh"
+bash -n "$RERE/addssh"
+
+[[ -f "$RERE/add-ssh" ]] && cp -a "$RERE/add-ssh" "$BACKUP/rere/add-ssh" || true
+cat > "$RERE/add-ssh" <<'__KZN_ADD_SSH__'
+#!/usr/bin/env bash
+source /usr/local/rere/kaizen-ui 2>/dev/null || true
+# Dinda Putri Cindyani
+
+# Function to URL-encode username and password
+url_encode() {
+    local raw="$1"
+    local encoded=""
+    for (( i=0; i<${#raw}; i++ )); do
+        char="${raw:i:1}"
+        case "$char" in
+            [a-zA-Z0-9._~-]) encoded+="$char" ;;
+            *) encoded+=$(printf '%%%02X' "'$char") ;;
+        esac
+    done
+    echo "$encoded"
+}
+
+# Informasi
+domain=$(cat /etc/xray/domain)
+database="/etc/kaizensc/database/ssh/database.json"
+isp=$(cat /root/.isp)
+region=$(cat /root/.region)
+nameserver=$(cat /etc/kaizensc/slowdns/nameserver)
+pubkey=$(cat /etc/kaizensc/slowdns/server.pub)
+telegram_bot_token=$(cat /etc/kaizensc/bot/notif/bot.key)
+telegram_chatid=$(cat /etc/kaizensc/bot/notif/client.id)
+IPVPS=$(cat /root/.ip)
+
+# Cek SlowDNS Tunnel
+if [[ -f /etc/kaizensc/slowdns/nameserver ]]; then
+    dns_info_telegram="<b>───────────────</b>
+<b>DNSTT</b>
+<b>Nameserver:</b> <code>$nameserver</code>
+<b>Publik Key:</b> <code>$pubkey</code>
+<b>Port DNSTT:</b> <code>5300, 53, 443, 7000, 2053, 25000</code>"
+    
+    dns_info_output="───────────────    
+DNSTT
+Nameserver: $nameserver
+Publik Key: $pubkey
+Port DNSTT: 5300, 53, 443, 7000, 2053, 25000"
+else
+    dns_info_telegram=""
+    dns_info_output=""
+fi
+
+# Cek Argo Tunnel
+if [[ -f /etc/xray/domargo ]]; then
+    domargo=$(cat /etc/xray/domargo)
+    argo_info_telegram="<b>───────────────</b>
+<b>ARGO TUNNEL</b>
+<b>Domain:</b> <code>$domargo</code>
+<b>Port TLS (Cloudflare):</b> <code>443, 8443, 2053, 2083, 2087, 2096</code>
+<b>Port HTTP (Cloudflare):</b> <code>80, 8080, 8880, 2052, 2086, 2095</code>"
+    
+    argo_info_output="───────────────
+ARGO TUNNEL
+Domain: $domargo
+Port TLS (Cloudflare): 443, 8443, 2053, 2083, 2087, 2096
+Port HTTP (Cloudflare): 80, 8080, 8880, 2052, 2086, 2095"
+else
+    argo_info_telegram=""
+    argo_info_output=""
+fi
+
+# Create account
+clear
+kaizen_header " • Create SSH Account • "
+echo
+echo -e "  $(kaizen_text_colour)Information on adding an account$(kaizen_reset)"
+echo
+echo -e "  \e[0;36mFormat Limit IP login\e[0m"
+echo -e "  $(kaizen_text_colour)- 0 for unlimited login$(kaizen_reset)"
+echo -e "  $(kaizen_text_colour)- 1 for 1 limit login$(kaizen_reset)"
+echo
+kaizen_expiry_help
+echo
+kaizen_rainbow_line
+echo
+
+# Input Username dan cek ketersediaan
+while true; do
+    read -p " Username       : " Login
+    # Cek di database
+    if grep -qw "\"Username\":\s*\"$Login\"" "$database"; then
+        # Username sudah ada
+        echo -e " Username already \e[0;31m409\e[0m"
+    else
+        # Username tersedia
+        echo -e " 100 \e[0;32mOK\e[0m: username $Login tersedia"
+        break
+    fi
+done
+
+read -p " Password       : " Pass
+read -p " Max IP         : " iplimit
+#read -p " Quota (GB)     : " quota
+while true; do
+    read -rp " Expired        : " masaaktif
+    expi=$(kaizen_parse_expiry "$masaaktif" 2>/dev/null) && [[ -n "$expi" ]] && break
+    echo "[ERROR] Invalid expiry."
+done
+
+clear
+
+# Membuat folder jika belum ada
+mkdir -p /etc/kaizensc/limit/ssh/ip
+mkdir -p $(dirname "$database")
+
+# Simpan limit quota & IP jika diberikan
+#[[ $quota -gt 0 ]] && echo -e "$((quota * 1024 * 1024 * 1024))" > "/etc/kaizensc/limit/ssh/quota/$Login"
+[[ $iplimit -gt 0 ]] && echo -e "$iplimit" > "/etc/kaizensc/limit/ssh/ip/$Login"
+
+# Pastikan file JSON ada
+if [[ ! -f "$database" ]]; then
+    echo "[]" > "$database"
+fi
+
+# Buat akun SSH
+#useradd -e $(date -d "$masaaktif days" +"%Y-%m-%d") -s /usr/bin/bash -m -d /home/$Login $Login
+ssh_chage_date=$(date -d "${expi%% *} +1 day" +%F)
+sudo useradd --shell /usr/sbin/nologin "$Login" -e "$ssh_chage_date"
+echo "$Login:$Pass" | sudo chpasswd
+echo -e "$Pass
+$Pass" | passwd "$Login" &> /dev/null
+hariini=$(date -d "0 days" +"%Y-%m-%d")
+
+# Simpan ke database JSON
+jq --arg user "$Login" --arg pass "$Pass" --arg ip "$iplimit" --arg quota "$quota" --arg exp "$expi" \
+    '. += [{"Username": $user, "Password": $pass, "LimitIP": $ip, "Quota": $quota, "Expired": $exp}]' \
+    "$database" > "${database}.tmp" && mv "${database}.tmp" "$database"
+
+#Socks5 Detail
+proxy_ip=$(hostname -I | awk '{print $1}')
+encoded_username=$(url_encode "$Login")
+encoded_password=$(url_encode "$Pass")
+clear
+
+# Mengirim Notifikasi Ke Bot Telegram
+TEKS="
+<b>───────────────</b>
+<b> SSH ACCOUNT DETAILS </b>
+<b>───────────────</b>
+<b> Hostname   :</b> <code>$domain</code> / <code>$IPVPS</code>
+<b> Wildcard   :</b> <code>bug.com.${domain}</code>
+<b> Username   :</b> <code>$Login</code>
+<b> Password   :</b> <code>$Pass</code>
+<b> ISP        :</b> <code>$isp</code>
+<b> Region     :</b> <code>$region</code>
+<b>───────────────</b>
+<b> WS Ports   :</b> <code>80-108,2082,8000,8080-8180,2084-2199</code>
+<b> TLS/SSL    :</b> <code>443,8443,8999,9443,9755,400-777</code>
+<b> UDP Custom :</b> <code>1-65535</code>
+<b> HTTP Proxy :</b> <code>3128</code>
+<b> OpenVPN    :</b> <code>1194/2200</code>
+${argo_info_telegram}
+<b>───────────────</b>
+<b> Socks5     :</b>
+<code>socks5://${encoded_username}:${encoded_password}@${proxy_ip}:1080</code>
+${dns_info_telegram}
+<b>───────────────</b>
+<b> HTTP Custom :</b>
+<code>${domain}:1-65535@${Login}:${Pass}</code>
+<b>───────────────</b>
+<b> Limit IP    :</b> <code>$iplimit</code>
+<b> Payload WS  :</b>
+<code>GET /ssh HTTP/1.1[crlf]Host:${domain}[crlf]Upgrade:websocket[crlf][crlf]</code>
+<b>───────────────</b>
+<b> OpenVPN     :</b> <a href=\"https://$domain/fn/index.html\">https://$domain/fn/index.html</a>
+<b>───────────────</b>
+<b> Expired On  :</b> <code>$expi</code>
+<b>───────────────</b>
+"
+
+curl -s -X POST "https://api.telegram.org/bot$telegram_bot_token/sendMessage" \
+    -d "chat_id=$telegram_chatid" \
+    -d "parse_mode=HTML" \
+    -d "text=${TEKS}" > /dev/null
+
+# Output informasi akun
+clear
+echo -e "
+╔───────────────╗
+   SSH ACCOUNT
+ ───────────────
+  Hostname   : $domain / $IPVPS
+  Wildcard   : bug.com.${domain}
+  Username   : $Login
+  Password   : $Pass
+  ISP        : $isp
+  Region     : $region
+ ───────────────
+  WS Ports   : 80-108, 2082, 8000, 8080-8180, 2084-2199
+  TLS/SSL    : 443, 8443, 8999, 9443, 9755, 400-777
+  UDP Custom : 1-65535
+  HTTP Proxy : 3128
+  OpenVPN    : 1194 / 2200
+  ${argo_info_telegram}
+ ───────────────
+  Socks5     :
+  socks5://${encoded_username}:${encoded_password}@${proxy_ip}:1080
+  ${dns_info_telegram}
+ ───────────────
+  HTTP Custom : ${domain}:1-65535@${Login}:${Pass}
+ ───────────────
+  Limit IP    : $iplimit
+  Payload WS  : GET /ssh HTTP/1.1[crlf]Host:${domain}[crlf]Upgrade:websocket[crlf][crlf]
+ ───────────────
+  OpenVPN     : https://$domain/fn/index.html
+ ───────────────
+  Expired On  : $expi
+╚───────────────╝
+"
+
+__KZN_ADD_SSH__
+chmod 0755 "$RERE/add-ssh"
+bash -n "$RERE/add-ssh"
+
+[[ -f "$RERE/extend-ssh" ]] && cp -a "$RERE/extend-ssh" "$BACKUP/rere/extend-ssh" || true
+cat > "$RERE/extend-ssh" <<'__KZN_EXTEND_SSH__'
+#!/usr/bin/env bash
+source /usr/local/rere/kaizen-ui 2>/dev/null || true
+set -u
+DB=/etc/kaizensc/database/ssh/database.json
+[[ -s "$DB" ]] || { echo 'No SSH account found.'; exit 0; }
+clear
+kaizen_header " • Extend SSH Account • "
+kaizen_ssh_table_header
+jq -r '.[]|[.Username,(.Expired//"Lifetime"),(.LimitIP//0)] | @tsv' "$DB" | while IFS=$'\t' read -r u e l; do
+ kaizen_is_ssh_account_user "$u" || continue
+ [[ "$l" =~ ^[0-9]+$ ]] || l=0
+ (( l > 0 )) && ltxt="$l" || ltxt='UL'
+ kaizen_ssh_table_row "$u" "$e" "$ltxt"
+done
+kaizen_ssh_table_footer
+echo
+kaizen_expiry_help
+echo
+kaizen_rainbow_line
+echo
+read -rp 'Input Username: ' user
+kaizen_is_ssh_account_user "$user" || { echo '[ERROR] SSH account not found.'; exit 1; }
+old=$(jq -r --arg u "$user" '.[]|select(.Username==$u)|.Expired' "$DB" | head -1)
+[[ -n "$old" && "$old" != null ]] || { echo '[ERROR] Account not found.'; exit 1; }
+while true; do
+  read -rp 'Expired: ' expin
+  new=$(kaizen_parse_expiry "$expin" "$old" 2>/dev/null) && [[ -n "$new" ]] && break
+  echo '[ERROR] Invalid expiry. Use 10, YYYY-MM-DD, or YYYY-MM-DD HH:MM:SS.'
+done
+jq --arg u "$user" --arg e "$new" 'map(if .Username==$u then .Expired=$e else . end)' "$DB" > "$DB.tmp" && mv "$DB.tmp" "$DB"
+# chage uses YYYY-MM-DD directly; user may be nologin but account expiration still applies.
+ssh_chage_date=$(date -d "${new%% *} +1 day" +%F)
+chage -E "$ssh_chage_date" "$user" >/dev/null 2>&1 || true
+clear
+kaizen_header " • SSH ACCOUNT EXTENDED • "
+printf 'Account       : %s\nPrevious      : %s\nNew Expiry    : %s\nStatus        : SUCCESS\n' "$user" "$old" "$new"
+
+__KZN_EXTEND_SSH__
+chmod 0755 "$RERE/extend-ssh"
+bash -n "$RERE/extend-ssh"
+
+[[ -f "$RERE/renew-ssh" ]] && cp -a "$RERE/renew-ssh" "$BACKUP/rere/renew-ssh" || true
+cat > "$RERE/renew-ssh" <<'__KZN_RENEW_SSH__'
+#!/usr/bin/env bash
+exec /usr/local/rere/extend-ssh "$@"
+
+__KZN_RENEW_SSH__
+chmod 0755 "$RERE/renew-ssh"
+bash -n "$RERE/renew-ssh"
+
+[[ -f "$RERE/trial-ssh" ]] && cp -a "$RERE/trial-ssh" "$BACKUP/rere/trial-ssh" || true
+cat > "$RERE/trial-ssh" <<'__KZN_TRIAL_SSH__'
+#!/usr/bin/env bash
+source /usr/local/rere/kaizen-ui 2>/dev/null || true
+
+# === COLOUR ===
+export red='\033[0;31m'
+export NC='\033[0m'
+export cyan='\e[0;36m'
+export green='\e[0;32m'
+RED='\e[0;31m'
+GREEN='\e[0;32m'
+YELLOW='\e[0;33m'
+CYAN="\e[0;36m"
+WHITE='\e[0;97m'
+red='\e[0;31m'
+green='\e[0;32m'
+yellow='\e[0;33m'
+cyan="\e[0;36m"
+white='\e[0;97m'
+plain='\e[0m'
+bgPutih="\e[0;47;30m"
+keatas="${CYAN}│${plain}"
+keatas2="${CYAN}║${plain}"
+
+# === RAINBOW LINE ===
+function cmd()
+{
+  printf "  "
+  for i in {52..57} {57..52}
+  do
+  printf "\e[38;5;${i}m────\e[0m"
+  done
+  echo
+}
+
+# Function to URL-encode username and password
+url_encode() {
+    local raw="$1"
+    local encoded=""
+    for (( i=0; i<${#raw}; i++ )); do
+        char="${raw:i:1}"
+        case "$char" in
+            [a-zA-Z0-9._~-]) encoded+="$char" ;;
+            *) encoded+=$(printf '%%%02X' "'$char") ;;
+        esac
+    done
+    echo "$encoded"
+}
+
+# Information
+domain=$(cat /etc/xray/domain)
+database="/etc/kaizensc/database/ssh/database.json"
+isp=$(cat /root/.isp)
+region=$(cat /root/.region)
+nameserver=$(cat /etc/kaizensc/slowdns/nameserver)
+pubkey=$(cat /etc/kaizensc/slowdns/server.pub)
+telegram_bot_token=$(cat /etc/kaizensc/bot/notif/bot.key)
+telegram_chatid=$(cat /etc/kaizensc/bot/notif/client.id)
+IPVPS=$(cat /root/.ip)
+
+# Check SlowDNS Tunnel
+if [[ -f /etc/kaizensc/slowdns/nameserver ]]; then
+    dns_info_telegram="<b>──────────── DNSTT ────────────</b>
+<b>Nameserver :</b> <code>$nameserver</code>
+<b>PubKey    :</b> <code>$pubkey</code>
+<b>Port      :</b> <code>5300, 53, 443, 7000, 2053, 25000</code>"
+    
+    dns_info_output="──────────── DNSTT ────────────
+Nameserver : $nameserver
+PubKey    : $pubkey
+Port      : 5300, 53, 443, 7000, 2053, 25000"
+else
+    dns_info_telegram=""
+    dns_info_output=""
+fi
+
+# Check Argo Tunnel
+if [[ -f /etc/xray/domargo ]]; then
+    domargo=$(cat /etc/xray/domargo)
+    argo_info_telegram="<b>──────────── ARGO ────────────</b>
+<b>Domain    :</b> <code>$domargo</code>
+<b>TLS Port  :</b> <code>443, 8443, 2053, 2083, 2087, 2096</code>
+<b>HTTP Port :</b> <code>80, 8080, 8880, 2052, 2086, 2095</code>"
+    
+    argo_info_output="──────────── ARGO ────────────
+Domain    : $domargo
+TLS Port  : 443, 8443, 2053, 2083, 2087, 2096
+HTTP Port : 80, 8080, 8880, 2052, 2086, 2095"
+else
+    argo_info_telegram=""
+    argo_info_output=""
+fi
+
+mkdir -p /etc/kaizensc/limit/ssh/ip
+mkdir -p $(dirname "$database")
+
+if [[ ! -f "$database" ]]; then
+    echo "[]" > "$database"
+fi
+
+generate_random_string() {
+    tr -dc A-Za-z0-9 </dev/urandom | head -c 8
+}
+
+Login="trial-$(generate_random_string)"
+Pass=$(generate_random_string)
+
+clear
+kaizen_header " • Create SSH Trial Account • "
+echo -e ""
+echo -e "${WHITE}Information on adding an account${plain}"
+echo
+echo -e "\e[0;36mExample of valid Expired input\e[0m"
+echo -e "${WHITE}- 1m  (expired 1 minute)${plain}"
+echo -e "${WHITE}- 1h  (expired 1 hour)${plain}"
+echo -e "${WHITE}- 1d  (expired 1 day)${plain}"
+echo
+kaizen_rainbow_line
+echo
+while true; do
+    read -rp " Expired (1m/1h/1d): " masaaktif
+    if [[ "$masaaktif" =~ ^[1-9][0-9]*[mhd]$ ]]; then
+        n=${masaaktif%?}; unit=${masaaktif: -1}
+        case "$unit" in m) unit_word="minutes";; h) unit_word="hours";; d) unit_word="days";; esac
+        expire_time=$(date -d "+$n $unit_word" +"%Y-%m-%d %H:%M:%S" 2>/dev/null)
+        [[ -n "$expire_time" ]] && break
+    fi
+    echo
+    echo -e "${RED}Invalid expired format. Use for example: 1m, 1h or 1d.${plain}"
+    echo
+done
+
+# Create SSH account
+#useradd -e $(date -d "$masaaktif days" +"%Y-%m-%d") -s /usr/bin/bash -m -d /home/$Login $Login
+sudo useradd --shell /usr/sbin/nologin "$Login"
+echo "$Login:$Pass" | sudo chpasswd
+echo -e "$Pass\n$Pass" | passwd $Login &> /dev/null
+
+iplimit="1"
+quota="1"
+
+# Save to JSON database
+jq --arg user "$Login" --arg pass "$Pass" --arg ip "$iplimit" --arg quota "$quota" --arg exp "$expire_time" \
+    '. += [{"Username": $user, "Password": $pass, "LimitIP": $ip, "Quota": $quota, "Expired": $exp, "Locked": false}]' \
+    "$database" > "${database}.tmp" && mv "${database}.tmp" "$database"
+
+# Save quota limit & IP if provided
+#[[ $quota -gt 0 ]] && echo -e "$((quota * 1024 * 1024 * 1024))" > "/etc/kaizensc/limit/ssh/quota/$Login"
+[[ $iplimit -gt 0 ]] && echo -e "$iplimit" > "/etc/kaizensc/limit/ssh/ip/$Login"
+
+#Socks5 Detail
+proxy_ip=$(hostname -I | awk '{print $1}')
+encoded_username=$(url_encode "$Login")
+encoded_password=$(url_encode "$Pass")
+clear
+
+# Send notification to Telegram bot
+TEKS="
+<b>──────────── SSH TRIAL ACCOUNT ────────────</b>
+<b>Host     :</b> <code>$domain</code> / <code>$IPVPS</code>
+<b>User     :</b> <code>$Login</code>
+<b>Pass     :</b> <code>$Pass</code>
+<b>ISP      :</b> <code>$isp</code>
+<b>Region   :</b> <code>$region</code>
+<b>──────────── CONNECTION ────────────</b>
+<b>WS Ports :</b> <code>80,2080,2082,8000,8080,8880</code>
+<b>TLS/SSL  :</b> <code>443,8443</code>
+<b>UDP      :</b> <code>1-65535</code>
+<b>Proxy    :</b> <code>3128</code>
+<b>OpenVPN  :</b> <code>1194/2200</code>
+${argo_info_telegram}
+<b>──────────── SOCKS5 ────────────</b>
+<code>socks5://${encoded_username}:${encoded_password}@${proxy_ip}:1080</code>
+${dns_info_telegram}
+<b>──────────── HTTP CUSTOM ────────────</b>
+<code>${domain}:1-65535@${Login}:${Pass}</code>
+<b>──────────── INFO ────────────</b>
+<b>Limit IP :</b> <code>$iplimit</code>
+<b>Payload  :</b>
+<code>GET /ssh HTTP/1.1[crlf]Host:${domain}[crlf]Upgrade:websocket[crlf][crlf]</code>
+<b>OpenVPN  :</b> <a href=\"https://$domain/fn/index.html\">https://$domain/fn/index.html</a>
+<b>Expired  :</b> <code>$expire_time</code>
+<b>──────────────────────────────</b>
+"
+
+curl -s -X POST "https://api.telegram.org/bot$telegram_bot_token/sendMessage" \
+    -d "chat_id=$telegram_chatid" \
+    -d "parse_mode=HTML" \
+    -d "text=${TEKS}" > /dev/null
+
+# Account information output
+clear
+echo -e ""
+echo -e "${CYAN}╔════════════════════════════════════════════════════════════╗${plain}"
+echo -e "${keatas2} ${bgPutih}            • SSH Trial Account Information •             ${plain} ${keatas2}"
+echo -e "${CYAN}╠════════════════════════════════════════════════════════════╣${plain}"
+echo -e "${CYAN}║${plain} ${white}Hostname        : $domain | $IPVPS${plain}"
+echo -e "${CYAN}║${plain} ${white}Username        : $Login${plain}"
+echo -e "${CYAN}║${plain} ${white}Password        : $Pass${plain}"
+echo -e "${CYAN}║${plain} ${white}ISP Server      : $isp${plain}"
+echo -e "${CYAN}║${plain} ${white}Region Server   : $region${plain}"
+echo -e "${CYAN}╠────────────────────────────────────────────────────────────╣${plain}"
+echo -e "${CYAN}║${plain} ${white}Port WebSocket  : 80, 2080, 2082, 8000, 8080, 8880${plain}"
+echo -e "${CYAN}║${plain} ${white}Port TLS/SSL    : 443, 8443${plain}"
+echo -e "${CYAN}║${plain} ${white}Port UDP Custom : 1-65535${plain}"
+echo -e "${CYAN}║${plain} ${white}Port HTTP Proxy : 3128 (Limit Access)${plain}"
+echo -e "${CYAN}║${plain} ${white}Port OpenVPN    : 1194 / 2200${plain}"
+echo -e "${CYAN}╠────────────────────────────────────────────────────────────╣${plain}"
+if [[ -n "$argo_info_output" ]]; then
+    echo -e "$argo_info_output"
+    echo -e "${CYAN}╠────────────────────────────────────────────────────────────╣${plain}"
+fi
+echo -e "${CYAN}║${plain} ${white}Socks5          : socks5://${encoded_username}:${encoded_password}@${domain}:1080${plain}"
+if [[ -n "$dns_info_output" ]]; then
+    echo -e "${CYAN}╠────────────────────────────────────────────────────────────╣${plain}"
+    echo -e "$dns_info_output"
+fi
+echo -e "${CYAN}╠────────────────────────────────────────────────────────────╣${plain}"
+echo -e "${CYAN}║${plain} ${white}HTTP Custom    : ${domain}:1-65535@${Login}:${Pass}${plain}"
+echo -e "${CYAN}╠────────────────────────────────────────────────────────────╣${plain}"
+echo -e "${CYAN}║${plain} ${white}Limit IP       : $iplimit${plain}"
+echo -e "${CYAN}║${plain} ${white}Payload WS     : GET /ssh HTTP/1.1[crlf]Host: ${domain}[crlf]Upgrade: websocket[crlf][crlf]${plain}"
+echo -e "${CYAN}╠────────────────────────────────────────────────────────────╣${plain}"
+echo -e "${CYAN}║${plain} ${white}OpenVPN        : https://$domain/fn/index.html${plain}"
+echo -e "${CYAN}╠────────────────────────────────────────────────────────────╣${plain}"
+echo -e "${CYAN}║${plain} ${white}Expired On${plain}     : ${GREEN}$expire_time${plain}"
+echo -e "${CYAN}╚════════════════════════════════════════════════════════════╝${plain}"
+
+
+__KZN_TRIAL_SSH__
+chmod 0755 "$RERE/trial-ssh"
+bash -n "$RERE/trial-ssh"
 
 [[ -f "$RERE/addss" ]] && cp -a "$RERE/addss" "$BACKUP/rere/addss" || true
 cat > "$RERE/addss" <<'__KZN_ADDSS__'
@@ -1146,6 +1640,12 @@ fi
 clear
 kaizen_header " • Create Shadowsocks Account • "
 echo
+echo -e "  $(kaizen_text_colour)Information on adding an account$(kaizen_reset)"
+echo
+kaizen_expiry_help
+echo
+kaizen_rainbow_line
+echo
 until [[ $user =~ ^[a-zA-Z0-9_]+$ && ${CLIENT_EXISTS} == '0' ]]; do
 		read -rp "Password : " -e user
 		CLIENT_EXISTS=$(grep -w $user /etc/shadowsocks-libev/akun.conf | wc -l)
@@ -1156,9 +1656,13 @@ until [[ $user =~ ^[a-zA-Z0-9_]+$ && ${CLIENT_EXISTS} == '0' ]]; do
 			exit 1
 		fi
 	done
-read -p "Expired (Days) : " masaaktif
-hariini=`date -d "0 days" +"%Y-%m-%d"`
-exp=`date -d "$masaaktif days" +"%Y-%m-%d"`
+while true; do
+    read -rp "Expired : " masaaktif
+    exp=$(kaizen_parse_expiry "$masaaktif" 2>/dev/null) && [[ -n "$exp" ]] && break
+    echo "[ERROR] Invalid expiry. Use 10, YYYY-MM-DD, or YYYY-MM-DD HH:MM:SS."
+done
+exp_store="${exp/ /T}"
+hariini=$(date -d "0 days" +"%Y-%m-%d")
 cat > /etc/shadowsocks-libev/$user-tls.json<<END
 {   
     "server":"0.0.0.0",
@@ -1200,9 +1704,7 @@ tmp1=$(echo -n "aes-256-cfb:${user}" | base64 -w0)
 tmp2=$(echo -n "aes-256-cfb:${user}" | base64 -w0)
 linkss1="ss://${tmp1}@${domain}:$tls"
 linkss2="ss://${tmp2}@${domain}:$http"
-echo -e "### $user $exp
-port_tls $tls
-port_http $http">>"/etc/shadowsocks-libev/akun.conf"
+echo -e "### $user $exp_store\nport_tls $tls\nport_http $http">>"/etc/shadowsocks-libev/akun.conf"
 service cron restart
 clear
 # Notifikasi Telegram
@@ -1254,42 +1756,6 @@ __KZN_ADDSS__
 chmod 0755 "$RERE/addss"
 bash -n "$RERE/addss"
 
-[[ -f "$RERE/delss" ]] && cp -a "$RERE/delss" "$BACKUP/rere/delss" || true
-cat > "$RERE/delss" <<'__KZN_DELSS__'
-#!/usr/bin/env bash
-source /usr/local/rere/kaizen-ui 2>/dev/null || true
-CONF=/etc/shadowsocks-libev/akun.conf
-clear; kaizen_header " • Delete Shadowsocks Account • "
-[[ -s "$CONF" ]] || { echo "No Shadowsocks account found."; exit 0; }
-mapfile -t rows < <(awk '/^### / {print $2 "|" $3}' "$CONF")
-((${#rows[@]})) || { echo "No Shadowsocks account found."; exit 0; }
-C=$(kaizen_table_colour); W=$(kaizen_text_colour); R=$(kaizen_reset); BG='\e[0;47;30m'
-uw=16; for row in "${rows[@]}"; do u=${row%%|*}; ((${#u}>uw))&&uw=${#u}; done
-a=$(kaizen_repeat_line '─' $((uw+2))); b=$(kaizen_repeat_line '─' 13)
-printf '%b┌%s┬%s┐%b\n' "$C" "$a" "$b" "$R"
-printf '%b│%b%b %-*s %b%b│%b%b %-11s %b%b│%b\n' "$C" "$R" "$BG" "$uw" Username "$R" "$C" "$R" "$BG" "Expire Date" "$R" "$C" "$R"
-printf '%b├%s┼%s┤%b\n' "$C" "$a" "$b" "$R"
-for row in "${rows[@]}"; do u=${row%%|*}; e=${row#*|}; printf '%b│%b %-*s %b│%b %-11s %b│%b\n' "$C" "$W" "$uw" "$u" "$C" "$W" "$e" "$C" "$R"; done
-printf '%b└%s┴%s┘%b\n' "$C" "$a" "$b" "$R"
-echo
-read -rp "Username to delete: " user
-line=$(awk -v u="$user" '$1=="###" && $2==u {print $2" "$3;exit}' "$CONF")
-[[ -n "$line" ]] || { echo "[ERROR] Account not found."; exit 1; }
-exp=${line#* }
-read -rp "Delete Shadowsocks account '$user'? (y/n): " yn
-[[ "$yn" =~ ^[Yy]$ ]] || { echo "Cancelled."; exit 0; }
-sed -i "/^### $user $exp$/,/^port_http /d" "$CONF"
-systemctl disable --now "shadowsocks-libev-server@$user-tls.service" "shadowsocks-libev-server@$user-http.service" >/dev/null 2>&1 || true
-rm -f "/etc/shadowsocks-libev/$user-tls.json" "/etc/shadowsocks-libev/$user-http.json"
-clear; kaizen_result_header "SHADOWSOCKS ACCOUNT DELETED"
-echo "Username : $user"
-echo "Expire   : $exp"
-echo "Status   : DELETED"
-
-__KZN_DELSS__
-chmod 0755 "$RERE/delss"
-bash -n "$RERE/delss"
-
 [[ -f "$RERE/renewss" ]] && cp -a "$RERE/renewss" "$BACKUP/rere/renewss" || true
 cat > "$RERE/renewss" <<'__KZN_RENEWSS__'
 #!/usr/bin/env bash
@@ -1300,26 +1766,36 @@ clear; kaizen_header " • Extend Shadowsocks Account • "
 mapfile -t rows < <(awk '/^### / {print $2 "|" $3}' "$CONF")
 ((${#rows[@]})) || { echo "No Shadowsocks account found."; exit 0; }
 C=$(kaizen_table_colour); W=$(kaizen_text_colour); R=$(kaizen_reset); BG='\e[0;47;30m'
-uw=16; for row in "${rows[@]}"; do u=${row%%|*}; ((${#u}>uw))&&uw=${#u}; done
-a=$(kaizen_repeat_line '─' $((uw+2))); b=$(kaizen_repeat_line '─' 13)
+uw=16; ew=11
+for row in "${rows[@]}"; do
+  u=${row%%|*}; e=${row#*|}; e="${e/T/ }"
+  ((${#u}>uw))&&uw=${#u}; ((${#e}>ew))&&ew=${#e}
+done
+a=$(kaizen_repeat_line '─' $((uw+2))); b=$(kaizen_repeat_line '─' $((ew+2))
+)
 printf '%b┌%s┬%s┐%b\n' "$C" "$a" "$b" "$R"
-printf '%b│%b%b %-*s %b%b│%b%b %-11s %b%b│%b\n' "$C" "$R" "$BG" "$uw" Username "$R" "$C" "$R" "$BG" "Expire Date" "$R" "$C" "$R"
+printf '%b│%b%b %-*s %b%b│%b%b %-*s %b%b│%b\n' "$C" "$R" "$BG" "$uw" Username "$R" "$C" "$R" "$BG" "$ew" "Expire Date" "$R" "$C" "$R"
 printf '%b├%s┼%s┤%b\n' "$C" "$a" "$b" "$R"
-for row in "${rows[@]}"; do u=${row%%|*}; e=${row#*|}; printf '%b│%b %-*s %b│%b %-11s %b│%b\n' "$C" "$W" "$uw" "$u" "$C" "$W" "$e" "$C" "$R"; done
+for row in "${rows[@]}"; do u=${row%%|*}; e=${row#*|}; e="${e/T/ }"; printf '%b│%b %-*s %b│%b %-*s %b│%b\n' "$C" "$W" "$uw" "$u" "$C" "$W" "$ew" "$e" "$C" "$R"; done
 printf '%b└%s┴%s┘%b\n' "$C" "$a" "$b" "$R"
+echo
+kaizen_expiry_help
+echo
+kaizen_rainbow_line
 echo
 read -rp "Username to extend: " user
 old=$(awk -v u="$user" '$1=="###" && $2==u {print $3;exit}' "$CONF")
 [[ -n "$old" ]] || { echo "[ERROR] Account not found."; exit 1; }
-read -rp "Extend (days): " days
-[[ "$days" =~ ^[0-9]+$ && "$days" -gt 0 ]] || { echo "[ERROR] Invalid days."; exit 1; }
-now=$(date +%F); old_epoch=$(date -d "$old" +%s); now_epoch=$(date -d "$now" +%s)
-((old_epoch>now_epoch)) && base=$old_epoch || base=$now_epoch
-new=$(date -d "@$((base+days*86400))" +%F)
-sed -i "s/^### $user $old$/### $user $new/" "$CONF"
+while true; do
+  read -rp "Expired: " expin
+  new=$(kaizen_parse_expiry "$expin" "$old" 2>/dev/null) && [[ -n "$new" ]] && break
+  echo "[ERROR] Invalid expiry. Use 10, YYYY-MM-DD, or YYYY-MM-DD HH:MM:SS."
+done
+new_store="${new/ /T}"
+sed -i "s|^### $user $old$|### $user $new_store|" "$CONF"
 clear; kaizen_result_header "SHADOWSOCKS ACCOUNT EXTENDED"
 echo "Username    : $user"
-echo "Previous    : $old"
+echo "Previous    : ${old/T/ }"
 echo "New Expiry  : $new"
 echo "Status      : SUCCESS"
 
@@ -1340,11 +1816,15 @@ while read -r user exp; do
  tls=$(awk -v u="$user" '$1=="###"&&$2==u{f=1;next} f&&$1=="port_tls"{print $2;exit}' "$CONF")
  http=$(awk -v u="$user" '$1=="###"&&$2==u{f=1;next} f&&$1=="port_http"{print $2;exit}' "$CONF")
  count=$(ss -tnp 2>/dev/null | grep ESTAB | grep -cE ":(${tls}|${http}) " || true)
- ((count>0)) && { status=ONLINE; online=$((online+1)); colour="$G"; } || { status=OFFLINE; colour="$W"; }
+ ((count>0)) || continue
+ status=ONLINE; online=$((online+1)); colour="$G"
  printf '%bUser   : %s%b\n' "$W" "$user" "$R"
  printf '%bStatus : %b%s%b\n' "$W" "$colour" "$status" "$R"
  printf '%bLogin  : %s connection(s)%b\n\n' "$W" "$count" "$R"
 done < <(awk '/^### /{print $2,$3}' "$CONF")
+if ((online==0)); then
+  printf '%bNo Shadowsocks users are currently online.%b\n' "$W" "$R"
+fi
 printf '%bTotal Online : %s%b\n' "$(kaizen_yellow)" "$online" "$R"
 read -rp 'Press Enter to continue...' _
 
@@ -1352,42 +1832,28 @@ __KZN_CEKSS__
 chmod 0755 "$RERE/cekss"
 bash -n "$RERE/cekss"
 
-[[ -f "$RERE/menu-ss" ]] && cp -a "$RERE/menu-ss" "$BACKUP/rere/menu-ss" || true
-cat > "$RERE/menu-ss" <<'__KZN_MENU_SS__'
+[[ -f "$RERE/xp-ss" ]] && cp -a "$RERE/xp-ss" "$BACKUP/rere/xp-ss" || true
+cat > "$RERE/xp-ss" <<'__KZN_XP_SS__'
 #!/usr/bin/env bash
-RED='\e[0;31m'; CYAN='\e[0;36m'; WHITE='\e[0;97m'; plain='\e[0m'; bgPutih='\e[0;47;30m'; keatas="${CYAN}│${plain}"
-cmd(){ printf '  '; local i; for i in {52..57} {57..52}; do printf "\e[38;5;${i}m────\e[0m"; done; echo; }
-invalid(){ echo; echo -e "${RED}Invalid option, please try again!${plain}"; sleep 1; }
-while true; do
-  clear; echo
-  echo -e "${CYAN}┌─────────────────────────────────────────────────┐${plain}"
-  echo -e "${keatas}${bgPutih}              • MENU SHADOWSOCKS •              ${plain}${keatas}"
-  echo -e "${CYAN}└─────────────────────────────────────────────────┘${plain}"
-  echo -e "  ${CYAN}[01]${plain} ${WHITE}Create Shadowsocks Account${plain}"
-  echo -e "  ${CYAN}[02]${plain} ${WHITE}Delete Shadowsocks Account${plain}"
-  echo -e "  ${CYAN}[03]${plain} ${WHITE}Extend Shadowsocks Account${plain}"
-  echo -e "  ${CYAN}[04]${plain} ${WHITE}Check Shadowsocks Login${plain}"
-  echo -e "  ${CYAN}[05]${plain} ${WHITE}Check Shadowsocks Expired Log${plain}"
-  echo -e "  ${CYAN}[06]${plain} ${WHITE}Back to Menu${plain}"
-  cmd
-  echo -e "  ${CYAN}[ x]${plain} ${WHITE}Exit${plain}"
-  cmd; echo
-  read -rp " $(echo -e "${WHITE}Please select an option [01-06 or x]:${plain} ")" opt
-  case "$opt" in
-    1|01) addss ;;
-    2|02) delss ;;
-    3|03) renewss ;;
-    4|04) cekss ;;
-    5|05) clear; kaizen_header " • Shadowsocks Expired Log • "; cat /var/log/expired-ss.log 2>/dev/null || echo "No expired log found."; read -rp 'Press Enter to continue...' _ ;;
-    6|06) exec menu ;;
-    x|X) clear; exit 0 ;;
-    *) invalid; continue ;;
-  esac
-done
+log_file="/var/log/expired-ss.log"
+akun_conf="/etc/shadowsocks-libev/akun.conf"
+[[ -f "$akun_conf" ]] || exit 0
+now=$(date +%s)
+echo "[$(date)] Checking expired Shadowsocks accounts..." >> "$log_file"
+while read -r user exp; do
+  [[ -n "$user" && -n "$exp" ]] || continue
+  exp_epoch=$(date -d "$exp" +%s 2>/dev/null || echo 0)
+  if ((exp_epoch>0 && exp_epoch<=now)); then
+    sed -i "/^### $user $exp$/,/^port_http /d" "$akun_conf"
+    systemctl disable --now "shadowsocks-libev-server@$user-tls.service" "shadowsocks-libev-server@$user-http.service" >/dev/null 2>&1 || true
+    rm -f "/etc/shadowsocks-libev/$user-tls.json" "/etc/shadowsocks-libev/$user-http.json"
+    echo "[$(date)] Account $user expired ($exp) and was removed." >> "$log_file"
+  fi
+done < <(awk '/^### /{print $2,$3}' "$akun_conf")
 
-__KZN_MENU_SS__
-chmod 0755 "$RERE/menu-ss"
-bash -n "$RERE/menu-ss"
+__KZN_XP_SS__
+chmod 0755 "$RERE/xp-ss"
+bash -n "$RERE/xp-ss"
 
 [[ -f "$RERE/menu-wgcf" ]] && cp -a "$RERE/menu-wgcf" "$BACKUP/rere/menu-wgcf" || true
 cat > "$RERE/menu-wgcf" <<'__KZN_MENU_WGCF__'
@@ -1403,25 +1869,36 @@ header(){ clear; kaizen_header " • $1 • "; }
 cmd(){ printf '  '; for i in {52..57} {57..52}; do printf "\e[38;5;${i}m────\e[0m"; done; echo; }
 valid_user(){ [[ "$1" =~ ^[A-Za-z0-9_.-]+$ ]]; }
 list_accounts(){
- local title="${1:-List Wireguard Account}" count=0 u type exp file uw=16
+ local title="${1:-List Wireguard Account}" count=0 u type exp file uw=16 ew=11
  header "$title"
- while IFS='|' read -r u type exp file; do [[ -n "$u" ]] || continue; ((${#u}>uw))&&uw=${#u}; done < "$DB"
+ while IFS='|' read -r u type exp file; do [[ -n "$u" ]] || continue; ((${#u}>uw))&&uw=${#u}; ((${#exp}>ew))&&ew=${#exp}; done < "$DB"
  C=$(kaizen_table_colour); W=$(kaizen_text_colour); R=$(kaizen_reset); BG='\e[0;47;30m'
- a=$(kaizen_repeat_line '─' $((uw+2))); b=$(kaizen_repeat_line '─' 8); d=$(kaizen_repeat_line '─' 13)
+ a=$(kaizen_repeat_line '─' $((uw+2))); b=$(kaizen_repeat_line '─' 8); d=$(kaizen_repeat_line '─' $((ew+2)))
  printf '%b┌%s┬%s┬%s┐%b\n' "$C" "$a" "$b" "$d" "$R"
- printf '%b│%b%b %-*s %b%b│%b%b %-6s %b%b│%b%b %-11s %b%b│%b\n' "$C" "$R" "$BG" "$uw" Username "$R" "$C" "$R" "$BG" Type "$R" "$C" "$R" "$BG" "Expire Date" "$R" "$C" "$R"
+ printf '%b│%b%b %-*s %b%b│%b%b %-6s %b%b│%b%b %-*s %b%b│%b\n' "$C" "$R" "$BG" "$uw" Username "$R" "$C" "$R" "$BG" Type "$R" "$C" "$R" "$BG" "$ew" "Expire Date" "$R" "$C" "$R"
  printf '%b├%s┼%s┼%s┤%b\n' "$C" "$a" "$b" "$d" "$R"
- while IFS='|' read -r u type exp file; do [[ -n "$u" ]] || continue; count=$((count+1)); printf '%b│%b %-*s %b│%b %-6s %b│%b %-11s %b│%b\n' "$C" "$W" "$uw" "$u" "$C" "$W" "$type" "$C" "$W" "$exp" "$C" "$R"; done < "$DB"
+ while IFS='|' read -r u type exp file; do [[ -n "$u" ]] || continue; count=$((count+1)); printf '%b│%b %-*s %b│%b %-6s %b│%b %-*s %b│%b\n' "$C" "$W" "$uw" "$u" "$C" "$W" "$type" "$C" "$W" "$ew" "$exp" "$C" "$R"; done < "$DB"
  printf '%b└%s┴%s┴%s┘%b\n' "$C" "$a" "$b" "$d" "$R"
  LIST_COUNT=$count
 }
 create_account(){
- local type="$1" flag username days exp filename url
+ local type="$1" flag username expin exp filename url
  header "CREATE WIREGUARD $type ACCOUNT"
+ echo
+ echo -e "  $(kaizen_text_colour)Information on adding an account$(kaizen_reset)"
+ echo
+ kaizen_expiry_help
+ echo
+ kaizen_rainbow_line
+ echo
  read -rp "Username: " username; valid_user "$username" || { echo -e "${RED}Invalid username.${plain}"; sleep 1; return; }
- grep -q "^${username}|" "$DB" && { echo -e "${RED}Username already exists.${plain}"; sleep 1; return; }
- read -rp "Expired (Days): " days; [[ "$days" =~ ^[0-9]+$ && "$days" -gt 0 ]] || { echo -e "${RED}Invalid days.${plain}"; sleep 1; return; }
- exp=$(date -d "+$days days" +%F); filename="wg-${username}-${type,,}.conf"; flag=-4; [[ "$type" == IPv6 ]] && flag=-6
+ awk -F'|' -v u="$username" '$1==u{found=1} END{exit !found}' "$DB" && { echo -e "${RED}Username already exists.${plain}"; sleep 1; return; }
+ while true; do
+   read -rp "Expired: " expin
+   exp=$(kaizen_parse_expiry "$expin" 2>/dev/null) && [[ -n "$exp" ]] && break
+   echo -e "${RED}Invalid expiry. Use 10, YYYY-MM-DD, or YYYY-MM-DD HH:MM:SS.${plain}"
+ done
+ filename="wg-${username}-${type,,}.conf"; flag=-4; [[ "$type" == IPv6 ]] && flag=-6
  if ! warp "$flag" > "$WEB/$filename"; then echo -e "${RED}Failed to generate Wireguard config.${plain}"; rm -f "$WEB/$filename"; sleep 2; return; fi
  printf '%s|%s|%s|%s\n' "$username" "$type" "$exp" "$filename" >> "$DB"
  url="https://$domain/fn/$filename"
@@ -1431,22 +1908,39 @@ create_account(){
 }
 delete_account(){
  list_accounts "DELETE WIREGUARD ACCOUNT"; ((LIST_COUNT>0)) || { read -rp 'Press Enter...' _; return; }
- read -rp "Username to delete: " user; row=$(grep -F "${user}|" "$DB"|head -1); [[ -n "$row" ]] || { echo "[ERROR] Account not found."; sleep 1; return; }
+ read -rp "Username to delete: " user; row=$(awk -F'|' -v u="$user" '$1==u{print;exit}' "$DB"); [[ -n "$row" ]] || { echo "[ERROR] Account not found."; sleep 1; return; }
  read -rp "Delete Wireguard account '$user'? (y/n): " yn; [[ "$yn" =~ ^[Yy]$ ]] || return
- file=$(echo "$row"|cut -d'|' -f4); grep -v -F "${user}|" "$DB" > "$DB.tmp" && mv "$DB.tmp" "$DB"; rm -f "$WEB/$file"
+ file=$(echo "$row"|cut -d'|' -f4)
+ awk -F'|' -v u="$user" '$1!=u' "$DB" > "$DB.tmp"
+ mv "$DB.tmp" "$DB"
+ rm -f "$WEB/$file"
  header "WIREGUARD ACCOUNT DELETED"; echo "Account : $user"; echo "Status  : DELETED"; read -rp 'Press Enter...' _
 }
 extend_account(){
  list_accounts "EXTEND WIREGUARD ACCOUNT"; ((LIST_COUNT>0)) || { read -rp 'Press Enter...' _; return; }
- read -rp "Username to extend: " user; row=$(grep -F "${user}|" "$DB"|head -1); [[ -n "$row" ]] || { echo "[ERROR] Account not found."; sleep 1; return; }
- old=$(echo "$row"|cut -d'|' -f3); read -rp "Extend (days): " days; [[ "$days" =~ ^[0-9]+$ && "$days" -gt 0 ]] || return
- now=$(date +%s); oe=$(date -d "$old" +%s); ((oe>now))&&base=$oe||base=$now; new=$(date -d "@$((base+days*86400))" +%F)
+ echo
+ kaizen_expiry_help
+ echo
+ kaizen_rainbow_line
+ echo
+ read -rp "Username to extend: " user; row=$(awk -F'|' -v u="$user" '$1==u{print;exit}' "$DB"); [[ -n "$row" ]] || { echo "[ERROR] Account not found."; sleep 1; return; }
+ old=$(echo "$row"|cut -d'|' -f3)
+ while true; do
+   read -rp "Expired: " expin
+   new=$(kaizen_parse_expiry "$expin" "$old" 2>/dev/null) && [[ -n "$new" ]] && break
+   echo -e "${RED}Invalid expiry. Use 10, YYYY-MM-DD, or YYYY-MM-DD HH:MM:SS.${plain}"
+ done
  awk -F'|' -v OFS='|' -v u="$user" -v n="$new" '$1==u{$3=n}1' "$DB" > "$DB.tmp" && mv "$DB.tmp" "$DB"
- header "WIREGUARD ACCOUNT EXTENDED"; echo "Account    : $user"; echo "New Expiry : $new"; read -rp 'Press Enter...' _
+ header "WIREGUARD ACCOUNT EXTENDED"
+ echo "Account      : $user"
+ echo "Previous     : $old"
+ echo "New Expiry   : $new"
+ echo "Status       : SUCCESS"
+ read -rp 'Press Enter...' _
 }
 check_config(){
  list_accounts "CHECK WIREGUARD CONFIG"; ((LIST_COUNT>0)) || { read -rp 'Press Enter...' _; return; }
- read -rp "Username: " user; row=$(grep -F "${user}|" "$DB"|head -1); [[ -n "$row" ]] || { echo "[ERROR] Account not found."; sleep 1; return; }
+ read -rp "Username: " user; row=$(awk -F'|' -v u="$user" '$1==u{print;exit}' "$DB"); [[ -n "$row" ]] || { echo "[ERROR] Account not found."; sleep 1; return; }
  IFS='|' read -r u type exp file <<< "$row"; header "WIREGUARD ACCOUNT CONFIG"
  echo "Username    : $u"; echo "Type        : $type"; echo "Expire Date : $exp"; echo "Download    : https://$domain/fn/$file"; echo; cat "$WEB/$file" 2>/dev/null || true
  read -rp 'Press Enter to continue...' _
@@ -1478,7 +1972,11 @@ WEB=/var/www/html/fn
 today=$(date +%s); tmp=$(mktemp)
 while IFS='|' read -r u type exp file; do
  [[ -n "$u" ]] || continue
- ee=$(date -d "$exp 23:59:59" +%s 2>/dev/null || echo 0)
+ if [[ "$exp" == *" "* ]]; then
+   ee=$(date -d "$exp" +%s 2>/dev/null || echo 0)
+ else
+   ee=$(date -d "$exp 23:59:59" +%s 2>/dev/null || echo 0)
+ fi
  if ((ee>today)); then printf '%s|%s|%s|%s\n' "$u" "$type" "$exp" "$file" >> "$tmp"; else rm -f "$WEB/$file"; fi
 done < "$DB"
 mv "$tmp" "$DB"
@@ -1543,10 +2041,22 @@ EOF
 }
 add_pw(){
  installed || { header "ADD ZIVPN PASSWORD"; echo "ZIVPN is not installed."; read -rp 'Press Enter...' _; return; }
- header "ADD ZIVPN PASSWORD"; read -rp "Password: " pw; [[ -n "$pw" ]] || return
+ header "ADD ZIVPN PASSWORD"
+ echo
+ echo -e "  $(kaizen_text_colour)Information on adding an account$(kaizen_reset)"
+ echo
+ kaizen_expiry_help
+ echo
+ kaizen_rainbow_line
+ echo
+ read -rp "Password: " pw; [[ -n "$pw" ]] || return
  passwords | grep -Fxq "$pw" && { echo "Password already exists."; sleep 1; return; }
- read -rp "Expired (Days): " days; [[ "$days" =~ ^[0-9]+$ && "$days" -gt 0 ]] || { echo "Invalid days."; sleep 1; return; }
- exp=$(date -d "+$days days" +%F); mapfile -t arr < <(passwords); arr+=("$pw"); update_passwords "${arr[@]}"; init_db
+ while true; do
+   read -rp "Expired: " expin
+   exp=$(kaizen_parse_expiry "$expin" 2>/dev/null) && [[ -n "$exp" ]] && break
+   echo "Invalid expiry. Use 10, YYYY-MM-DD, or YYYY-MM-DD HH:MM:SS."
+ done
+ mapfile -t arr < <(passwords); arr+=("$pw"); update_passwords "${arr[@]}"; init_db
  jq --arg p "$pw" --arg e "$exp" 'del(.[]|select(.password==$p)) + [{"password":$p,"expired":$e}]' "$DB" > "$DB.tmp" && mv "$DB.tmp" "$DB"
  header "ZIVPN PASSWORD CREATED"; echo "Password    : $pw"; echo "Expire Date : $exp"; echo "Status      : SUCCESS"; read -rp 'Press Enter...' _
 }
@@ -1558,6 +2068,30 @@ delete_pw(){
  read -rp "Delete password '$pw'? (y/n): " yn; [[ "$yn" =~ ^[Yy]$ ]] || return
  update_passwords "${new[@]}"; jq --arg p "$pw" 'del(.[]|select(.password==$p))' "$DB" > "$DB.tmp" && mv "$DB.tmp" "$DB"
  header "ZIVPN PASSWORD DELETED"; echo "Password : $pw"; echo "Status   : DELETED"; read -rp 'Press Enter...' _
+}
+extend_pw(){
+ installed || { header "EXTEND ZIVPN ACCOUNT"; echo "ZIVPN is not installed."; read -rp 'Press Enter...' _; return; }
+ list_table "EXTEND ZIVPN ACCOUNT"
+ ((ZCOUNT)) || { read -rp 'Press Enter...' _; return; }
+ echo
+ kaizen_expiry_help
+ echo
+ kaizen_rainbow_line
+ echo
+ read -rp "Password to extend: " pw
+ old=$(pw_exp "$pw"); [[ -n "$old" && "$old" != null ]] || { echo "Password not found."; sleep 1; return; }
+ while true; do
+   read -rp "Expired: " expin
+   new=$(kaizen_parse_expiry "$expin" "$old" 2>/dev/null) && [[ -n "$new" ]] && break
+   echo "Invalid expiry. Use 10, YYYY-MM-DD, or YYYY-MM-DD HH:MM:SS."
+ done
+ jq --arg p "$pw" --arg e "$new" 'map(if .password==$p then .expired=$e else . end)' "$DB" > "$DB.tmp" && mv "$DB.tmp" "$DB"
+ header "ZIVPN ACCOUNT EXTENDED"
+ echo "Password     : $pw"
+ echo "Previous     : $old"
+ echo "New Expiry   : $new"
+ echo "Status       : SUCCESS"
+ read -rp 'Press Enter...' _
 }
 status_z(){
  header "ZIVPN STATUS"; if installed; then systemctl is-active --quiet zivpn && st=ONLINE || st=OFFLINE; else st=NOT-INSTALLED; fi
@@ -1573,712 +2107,117 @@ while true; do
  echo -e "  ${CYAN}[01]${plain} ${WHITE}Install / Update ZIVPN${plain}"
  echo -e "  ${CYAN}[02]${plain} ${WHITE}Add Password${plain}"
  echo -e "  ${CYAN}[03]${plain} ${WHITE}Delete Password${plain}"
- echo -e "  ${CYAN}[04]${plain} ${WHITE}Uninstall ZIVPN${plain}"
- echo -e "  ${CYAN}[05]${plain} ${WHITE}Check Status${plain}"
- echo -e "  ${CYAN}[06]${plain} ${WHITE}Change Obfs${plain}"
- echo -e "  ${CYAN}[07]${plain} ${WHITE}Change Port${plain}"
- echo -e "  ${CYAN}[08]${plain} ${WHITE}List Config & Password${plain}"
- echo -e "  ${CYAN}[09]${plain} ${WHITE}Back to Menu${plain}"
+ echo -e "  ${CYAN}[04]${plain} ${WHITE}Extend Account${plain}"
+ echo -e "  ${CYAN}[05]${plain} ${WHITE}Uninstall ZIVPN${plain}"
+ echo -e "  ${CYAN}[06]${plain} ${WHITE}Check Status${plain}"
+ echo -e "  ${CYAN}[07]${plain} ${WHITE}Change Obfs${plain}"
+ echo -e "  ${CYAN}[08]${plain} ${WHITE}Change Port${plain}"
+ echo -e "  ${CYAN}[09]${plain} ${WHITE}List Config & Password${plain}"
+ echo -e "  ${CYAN}[10]${plain} ${WHITE}Back to Menu${plain}"
  cmd; echo -e "  ${CYAN}[ x]${plain} ${WHITE}Exit${plain}"; cmd
- read -rp "Please select an option [01-09 or x]: " opt
- case "$opt" in 1|01) install_z;;2|02) add_pw;;3|03) delete_pw;;4|04) uninstall_z;;5|05) status_z;;6|06) change_obfs;;7|07) change_port;;8|08) list_cfg;;9|09) exec menu;;x|X) exit 0;;*) sleep 1;;esac
+ read -rp "Please select an option [01-10 or x]: " opt
+ case "$opt" in 1|01) install_z;;2|02) add_pw;;3|03) delete_pw;;4|04) extend_pw;;5|05) uninstall_z;;6|06) status_z;;7|07) change_obfs;;8|08) change_port;;9|09) list_cfg;;10) exec menu;;x|X) exit 0;;*) sleep 1;;esac
 done
 
 __KZN_MENU_UDP_ZIVPN__
 chmod 0755 "$RERE/menu-udp-zivpn"
 bash -n "$RERE/menu-udp-zivpn"
 
-[[ -f "$RERE/menu-udp" ]] && cp -a "$RERE/menu-udp" "$BACKUP/rere/menu-udp" || true
-cat > "$RERE/menu-udp" <<'__KZN_MENU_UDP__'
+[[ -f "$RERE/extend-zivpn" ]] && cp -a "$RERE/extend-zivpn" "$BACKUP/rere/extend-zivpn" || true
+cat > "$RERE/extend-zivpn" <<'__KZN_EXTEND_ZIVPN__'
 #!/usr/bin/env bash
 source /usr/local/rere/kaizen-ui 2>/dev/null || true
-RED='\e[0;31m'; CYAN='\e[0;36m'; WHITE='\e[0;97m'; plain='\e[0m'
-cmd(){ printf '  '; local i; for i in {52..57} {57..52}; do printf "\e[38;5;${i}m────\e[0m"; done; echo; }
-while true; do
- clear; echo; kaizen_header " • EXTRA PROTOCOL • "
- echo -e "  ${CYAN}[01]${plain} ${WHITE}UDP Custom${plain}"
- echo -e "  ${CYAN}[02]${plain} ${WHITE}UDP Request${plain}"
- echo -e "  ${CYAN}[03]${plain} ${WHITE}Hysteria 1${plain}"
- echo -e "  ${CYAN}[04]${plain} ${WHITE}Hysteria 2${plain}"
- echo -e "  ${CYAN}[05]${plain} ${WHITE}SlowDNS${plain}"
- echo -e "  ${CYAN}[06]${plain} ${WHITE}SlowUDP${plain}"
- echo -e "  ${CYAN}[07]${plain} ${WHITE}FastDNS / DNSTT${plain}"
- echo -e "  ${CYAN}[08]${plain} ${WHITE}Back to Menu${plain}"
- cmd; echo -e "  ${CYAN}[ x]${plain} ${WHITE}Exit${plain}"; cmd; echo
- read -rp "Please select an option [01-08 or x]: " opw
- case "$opw" in
-  1|01) menu-udp-custom;; 2|02) menu-udp-request;;
-  3|03) clear; bash <(curl -fsSL https://raw.githubusercontent.com/evozi/hysteria-install/main/hy1/hysteria1.sh);;
-  4|04) clear; bash <(curl -fsSL https://raw.githubusercontent.com/evozi/hysteria-install/main/hy2/hysteria2.sh);;
-  5|05) slowdns;; 6|06) clear; bash <(curl -fsSL https://raw.githubusercontent.com/evozi/hysteria-install/main/slowudp/slowudp.sh);;
-  7|07) menu-dnstt;; 8|08) exec menu;; x|X) clear; exit 0;;
-  *) echo -e "${RED}Invalid option.${plain}"; sleep 1;;
- esac
+CONFIG=/etc/zivpn/config.json
+DB=/etc/zivpn/password.json
+[[ -f "$CONFIG" && -f "$DB" ]] || { clear; kaizen_header " • Extend ZIVPN Account • "; echo "ZIVPN is not installed or password database is missing."; exit 1; }
+
+clear; kaizen_header " • Extend ZIVPN Account • "
+mapfile -t pws < <(jq -r '.auth.config[]?' "$CONFIG" 2>/dev/null)
+((${#pws[@]})) || { echo "No password to extend."; exit 0; }
+W=$(kaizen_text_colour); C=$(kaizen_table_colour); R=$(kaizen_reset); BG='\e[0;47;30m'
+pw_w=16; exp_w=11
+for pw in "${pws[@]}"; do
+  exp=$(jq -r --arg p "$pw" '.[]|select(.password==$p)|.expired' "$DB"|head -1)
+  [[ -n "$exp" && "$exp" != null ]] || exp="-"
+  ((${#pw}>pw_w))&&pw_w=${#pw}; ((${#exp}>exp_w))&&exp_w=${#exp}
 done
-
-__KZN_MENU_UDP__
-chmod 0755 "$RERE/menu-udp"
-bash -n "$RERE/menu-udp"
-
-[[ -f "$RERE/menu-udp-custom" ]] && cp -a "$RERE/menu-udp-custom" "$BACKUP/rere/menu-udp-custom" || true
-cat > "$RERE/menu-udp-custom" <<'__KZN_MENU_UDP_CUSTOM__'
-#!/usr/bin/env bash
-source /usr/local/rere/kaizen-ui 2>/dev/null || true
-RED='\e[0;31m'; GREEN='\e[0;32m'; CYAN='\e[0;36m'; WHITE='\e[0;97m'; plain='\e[0m'
-header(){ clear; kaizen_header " • $1 • "; }
-result(){ header "$1"; shift; printf '%s\n' "$@"; echo; read -rp 'Press Enter to continue...' _; }
-status_now(){ systemctl is-active --quiet udp-custom && echo -e "${GREEN}ON${plain}" || echo -e "${RED}OFF${plain}"; }
-
-enable_s(){ systemctl daemon-reload; systemctl enable --now udp-custom; result "UDP CUSTOM" "Status : ENABLED"; }
-disable_s(){ systemctl disable --now udp-custom >/dev/null 2>&1 || true; result "UDP CUSTOM" "Status : DISABLED"; }
-restart_s(){ systemctl daemon-reload; systemctl restart udp-custom; result "UDP CUSTOM" "Status : RESTARTED"; }
-change_port(){
- header "CHANGE UDP CUSTOM PORT"
- read -rp "New Port: " port
- [[ "$port" =~ ^[0-9]+$ && $port -ge 1 && $port -le 65535 ]] || { echo -e "${RED}Invalid port.${plain}"; sleep 1; return; }
- mkdir -p /etc/kaizensc/udp-custom
- cat > /etc/kaizensc/udp-custom/config.json <<EOF
-{
-  "listen": ":${port}",
-  "stream_buffer": 33554432,
-  "receive_buffer": 83886080,
-  "auth": {"mode":"passwords"}
-}
-EOF
- systemctl restart udp-custom; result "UDP CUSTOM PORT UPDATED" "Port : $port" "Status : SUCCESS"
-}
-exclude_port(){
- header "EXCLUDE UDP CUSTOM PORT"
- echo "Example: 7100,7200,7300"
- read -rp "Exclude Port(s): " ports
- [[ -n "$ports" ]] || return
- local exec
- exec=$(systemctl cat udp-custom 2>/dev/null | sed -n 's/^ExecStart=//p' | head -1)
- [[ -n "$exec" ]] || { echo -e "${RED}Service ExecStart not found.${plain}"; sleep 2; return; }
- exec=$(echo "$exec" | sed -E 's/[[:space:]]+--exclude[= ]+[^ ]+//g')
- mkdir -p /etc/systemd/system/udp-custom.service.d
- cat > /etc/systemd/system/udp-custom.service.d/override.conf <<EOF
-[Service]
-ExecStart=
-ExecStart=$exec --exclude $ports
-EOF
- systemctl daemon-reload; systemctl restart udp-custom; result "UDP CUSTOM EXCLUDE PORT UPDATED" "Exclude : $ports" "Status : SUCCESS"
-}
+a=$(kaizen_repeat_line '─' $((pw_w+2))); b=$(kaizen_repeat_line '─' $((exp_w+2)))
+printf '%b┌%s┬%s┐%b\n' "$C" "$a" "$b" "$R"
+printf '%b│%b%b %-*s %b%b│%b%b %-*s %b%b│%b\n' "$C" "$R" "$BG" "$pw_w" Password "$R" "$C" "$R" "$BG" "$exp_w" "Expire Date" "$R" "$C" "$R"
+printf '%b├%s┼%s┤%b\n' "$C" "$a" "$b" "$R"
+for pw in "${pws[@]}"; do exp=$(jq -r --arg p "$pw" '.[]|select(.password==$p)|.expired' "$DB"|head -1); [[ -n "$exp" && "$exp" != null ]] || exp="-"; printf '%b│%b %-*s %b│%b %-*s %b│%b\n' "$C" "$W" "$pw_w" "$pw" "$C" "$W" "$exp_w" "$exp" "$C" "$R"; done
+printf '%b└%s┴%s┘%b\n' "$C" "$a" "$b" "$R"
+echo
+kaizen_expiry_help
+echo
+kaizen_rainbow_line
+echo
+read -rp "Password to extend: " pw
+old=$(jq -r --arg p "$pw" '.[]|select(.password==$p)|.expired' "$DB"|head -1)
+[[ -n "$old" && "$old" != null ]] || { echo "[ERROR] Password not found."; exit 1; }
 while true; do
- header "UDP CUSTOM"
- echo -e "  ${WHITE}Status : $(status_now)${plain}"; echo
- offset=0
- base=$((offset+1))
- echo -e "  ${CYAN}[$(printf '%02d' $base)]${plain} ${WHITE}Enable${plain}"
- echo -e "  ${CYAN}[$(printf '%02d' $((base+1)))]${plain} ${WHITE}Disable${plain}"
- echo -e "  ${CYAN}[$(printf '%02d' $((base+2)))]${plain} ${WHITE}Restart${plain}"
- echo -e "  ${CYAN}[$(printf '%02d' $((base+3)))]${plain} ${WHITE}Change Port${plain}"
- echo -e "  ${CYAN}[$(printf '%02d' $((base+4)))]${plain} ${WHITE}Exclude Port${plain}"
- echo -e "  ${CYAN}[00]${plain} ${WHITE}Back to Extra Protocol${plain}"
- read -rp "Select option: " opt
- case "$opt" in
- 1|01) enable_s;; 2|02) disable_s;; 3|03) restart_s;; 4|04) change_port;; 5|05) exclude_port;;
- 0|00) exec menu-udp;; x|X) exit 0;; *) echo -e "${RED}Invalid option.${plain}"; sleep 1;; esac
+  read -rp "Expired: " expin
+  new=$(kaizen_parse_expiry "$expin" "$old" 2>/dev/null) && [[ -n "$new" ]] && break
+  echo "[ERROR] Invalid expiry. Use 10, YYYY-MM-DD, or YYYY-MM-DD HH:MM:SS."
 done
+jq --arg p "$pw" --arg e "$new" 'map(if .password==$p then .expired=$e else . end)' "$DB" > "$DB.tmp" && mv "$DB.tmp" "$DB"
+clear; kaizen_result_header "ZIVPN ACCOUNT EXTENDED"
+echo "Password     : $pw"
+echo "Previous     : $old"
+echo "New Expiry   : $new"
+echo "Status       : SUCCESS"
 
-__KZN_MENU_UDP_CUSTOM__
-chmod 0755 "$RERE/menu-udp-custom"
-bash -n "$RERE/menu-udp-custom"
+__KZN_EXTEND_ZIVPN__
+chmod 0755 "$RERE/extend-zivpn"
+bash -n "$RERE/extend-zivpn"
 
-[[ -f "$RERE/menu-udp-request" ]] && cp -a "$RERE/menu-udp-request" "$BACKUP/rere/menu-udp-request" || true
-cat > "$RERE/menu-udp-request" <<'__KZN_MENU_UDP_REQUEST__'
+[[ -f "$RERE/zivpn-expired" ]] && cp -a "$RERE/zivpn-expired" "$BACKUP/rere/zivpn-expired" || true
+cat > "$RERE/zivpn-expired" <<'__KZN_ZIVPN_EXPIRED__'
 #!/usr/bin/env bash
-source /usr/local/rere/kaizen-ui 2>/dev/null || true
-RED='\e[0;31m'; GREEN='\e[0;32m'; CYAN='\e[0;36m'; WHITE='\e[0;97m'; plain='\e[0m'
-header(){ clear; kaizen_header " • $1 • "; }
-result(){ header "$1"; shift; printf '%s\n' "$@"; echo; read -rp 'Press Enter to continue...' _; }
-status_now(){ systemctl is-active --quiet udp-request && echo -e "${GREEN}ON${plain}" || echo -e "${RED}OFF${plain}"; }
+CONFIG_PATH="/etc/zivpn/config.json"
+PASSWORD_DB="/etc/zivpn/password.json"
+[[ -f "$PASSWORD_DB" && -f "$CONFIG_PATH" ]] || exit 0
 
-install_service(){
- header "INSTALL UDP REQUEST"
- local ip_nat interface public_ip
- ip_nat=$(ip -4 addr | awk '/inet / && $2 !~ /^127/ {sub(/\/.*/,"",$2);print $2;exit}')
- interface=$(ip -4 route show default | awk '{print $5;exit}')
- public_ip=$(cat /root/.ip 2>/dev/null || echo "$ip_nat")
- cat > /etc/systemd/system/udp-request.service <<EOF
-[Unit]
-Description=UDP Request Service
-After=network.target
-[Service]
-Type=simple
-User=root
-WorkingDirectory=/etc/kaizensc/udp-request
-ExecStart=/etc/kaizensc/udp-request/udp-request -ip=$public_ip -net=$interface -exclude=7100,7200,7300,7400,7500,7600,7700,7800,7900,5300,5053,53,5353 -mode=system
-Restart=always
-RestartSec=3s
-[Install]
-WantedBy=multi-user.target
-EOF
- systemctl daemon-reload; systemctl enable --now udp-request
- result "UDP REQUEST INSTALLED" "Status : SUCCESS"
+get_passwords(){ jq -r '.auth.config[]?' "$CONFIG_PATH" 2>/dev/null; }
+update_passwords(){
+  local json
+  json=$(printf '%s\n' "$@" | jq -R . | jq -s .)
+  jq --argjson a "$json" '.auth.config=$a' "$CONFIG_PATH" > "$CONFIG_PATH.tmp" && mv "$CONFIG_PATH.tmp" "$CONFIG_PATH"
+  systemctl restart zivpn.service >/dev/null 2>&1 || true
 }
 
-enable_s(){ systemctl daemon-reload; systemctl enable --now udp-request; result "UDP REQUEST" "Status : ENABLED"; }
-disable_s(){ systemctl disable --now udp-request >/dev/null 2>&1 || true; result "UDP REQUEST" "Status : DISABLED"; }
-restart_s(){ systemctl daemon-reload; systemctl restart udp-request; result "UDP REQUEST" "Status : RESTARTED"; }
-change_port(){
- header "CHANGE UDP REQUEST PORT"
- read -rp "New Port: " port
- [[ "$port" =~ ^[0-9]+$ && $port -ge 1 && $port -le 65535 ]] || { echo -e "${RED}Invalid port.${plain}"; sleep 1; return; }
- mkdir -p /etc/kaizensc/udp-request
- cat > /etc/kaizensc/udp-request/config.json <<EOF
-{
-  "listen": ":${port}",
-  "stream_buffer": 33554432,
-  "receive_buffer": 83886080,
-  "auth": {"mode":"passwords"}
-}
-EOF
- systemctl restart udp-request; result "UDP REQUEST PORT UPDATED" "Port : $port" "Status : SUCCESS"
-}
-exclude_port(){
- header "EXCLUDE UDP REQUEST PORT"
- echo "Example: 7100,7200,7300"
- read -rp "Exclude Port(s): " ports
- [[ -n "$ports" ]] || return
- local exec
- exec=$(systemctl cat udp-request 2>/dev/null | sed -n 's/^ExecStart=//p' | head -1)
- [[ -n "$exec" ]] || { echo -e "${RED}Service ExecStart not found.${plain}"; sleep 2; return; }
- exec=$(echo "$exec" | sed -E 's/[[:space:]]+--exclude[= ]+[^ ]+//g')
- mkdir -p /etc/systemd/system/udp-request.service.d
- cat > /etc/systemd/system/udp-request.service.d/override.conf <<EOF
-[Service]
-ExecStart=
-ExecStart=$exec --exclude $ports
-EOF
- systemctl daemon-reload; systemctl restart udp-request; result "UDP REQUEST EXCLUDE PORT UPDATED" "Exclude : $ports" "Status : SUCCESS"
-}
-while true; do
- header "UDP REQUEST"
- echo -e "  ${WHITE}Status : $(status_now)${plain}"; echo
- echo -e "  ${CYAN}[01]${plain} ${WHITE}Install / Repair${plain}"; offset=1
- base=$((offset+1))
- echo -e "  ${CYAN}[$(printf '%02d' $base)]${plain} ${WHITE}Enable${plain}"
- echo -e "  ${CYAN}[$(printf '%02d' $((base+1)))]${plain} ${WHITE}Disable${plain}"
- echo -e "  ${CYAN}[$(printf '%02d' $((base+2)))]${plain} ${WHITE}Restart${plain}"
- echo -e "  ${CYAN}[$(printf '%02d' $((base+3)))]${plain} ${WHITE}Change Port${plain}"
- echo -e "  ${CYAN}[$(printf '%02d' $((base+4)))]${plain} ${WHITE}Exclude Port${plain}"
- echo -e "  ${CYAN}[00]${plain} ${WHITE}Back to Extra Protocol${plain}"
- read -rp "Select option: " opt
- case "$opt" in
- 1|01) install_service;; 2|02) enable_s;; 3|03) disable_s;; 4|04) restart_s;; 5|05) change_port;; 6|06) exclude_port;;
- 0|00) exec menu-udp;; x|X) exit 0;; *) echo -e "${RED}Invalid option.${plain}"; sleep 1;; esac
-done
-
-__KZN_MENU_UDP_REQUEST__
-chmod 0755 "$RERE/menu-udp-request"
-bash -n "$RERE/menu-udp-request"
-
-[[ -f "$RERE/menu-dnstt" ]] && cp -a "$RERE/menu-dnstt" "$BACKUP/rere/menu-dnstt" || true
-cat > "$RERE/menu-dnstt" <<'__KZN_MENU_DNSTT__'
-#!/usr/bin/env bash
-source /usr/local/rere/kaizen-ui 2>/dev/null || true
-
-clear
-
-
-# Full Option
-setup-fastdns() {
-clear
-read -p "Input Namserver: " nsd
-
-# package
-apt update
-apt install curl wget -y
-apt install binutils -y
-
-# Copy Core FastDNS
-wget -O /usr/local/bin/fastdoh "https://github.com/DindaPutriFN/fastdns/releases/download/1.0.0/fastdoh.x86-64"
-chmod +x /usr/local/bin/fastdoh
-
-cat > /etc/systemd/system/fastdns.service <<'EOF'
-[Unit]
-Description=KaizenSC FastDNS
-After=network-online.target
-Wants=network-online.target
-
-[Service]
-Type=simple
-ExecStart=/usr/local/bin/fastdoh
-Restart=on-failure
-RestartSec=2
-
-[Install]
-WantedBy=multi-user.target
-EOF
-systemctl daemon-reload
-systemctl enable fastdns.service
-
-
-# Copy Core DNSTT Client
-wget -q -O /etc/kaizensc/slowdns/dnstt-client "https://raw.githubusercontent.com/fisabiliyusri/SLDNS/main/slowdns/sldns-client"
-chmod +x /etc/kaizensc/slowdns/dnstt-client
-
-# Service Enable Fastdns
-systemctl daemon-reload
-systemctl enable fastdns
-systemctl restart fastdns.service
-
-# Setup Service Fastdns client
-echo -e "[Unit]
-Description=Client SlowDNS By KaizenSCVPN
-Documentation=https://nekopoi.care
-After=network.target nss-lookup.target
-
-[Service]
-Type=simple
-User=root
-CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_BIND_SERVICE
-AmbientCapabilities=CAP_NET_ADMIN CAP_NET_BIND_SERVICE
-NoNewPrivileges=true
-ExecStart=/etc/kaizensc/slowdns/dnstt-client -doh http://127.0.0.1:5053/dns-query -pubkey-file /etc/kaizensc/slowdns/server.pub $nsd 127.0.0.1:7000
-Restart=on-failure
-
-[Install]
-WantedBy=multi-user.target" > /etc/systemd/system/dnstt-client.service
-
-# Enable Service Client
-systemctl daemon-reload
-systemctl start dnstt-client.service
-systemctl enable dnstt-client.service
-
-# Done Status
-clear
-echo -e "\n Done Active FastDNS & DNSTT Client On Port 5053 & 7000"
-}
-
-clear
-red='\e[0;31m'
-green='\e[0;32m'
-NC='\033[0;97m'
-white='\033[0;97m'
-    mna89() {
-        clear
-            status="$(systemctl show dnstt.service --no-page)"
-            status_text=$(echo "${status}" | grep 'ActiveState=' | cut -f2 -d=)
-            status2="$(systemctl show fastdns.service --no-page)"
-            status_text2=$(echo "${status2}" | grep 'ActiveState=' | cut -f2 -d=)
-            status3="$(systemctl show dnstt-client.service --no-page)"
-            status_text3=$(echo "${status3}" | grep 'ActiveState=' | cut -f2 -d=)
-        clear
-        kaizen_header " • FastDNS / DNSTT • "
-        
-        if [ "${status_text}" == "active" ]; then
-            echo -e "        ${white}DNSTT Server${NC}: "${green}"running"$NC" ✓"
-        else
-            echo -e "        ${white}DNSTT Server${NC}: "$red"not running (Error)"$NC" "
-        fi
-        if [ "${status_text2}" == "active" ]; then
-            echo -e "        ${white}FastDNS${NC}: "${green}"running"$NC" ✓"
-        else
-            echo -e "        ${white}FastDNS${NC}: "$red"not running (Error)"$NC" "
-        fi
-        if [ "${status_text3}" == "active" ]; then
-            echo -e "        ${white}DNSTT Client${NC}: "${green}"running"$NC" ✓"
-        else
-            echo -e "        ${white}DNSTT Client${NC}: "$red"not running (Error)"$NC" "
-        fi
-        echo -e "
-        [01] Change Nameserver
-        [02] Renew Public Key & Server Key
-        [03] Restart DNSTT Tunnel on Server
-    	[04] Setup FastDNS
-        [00] Back to Extra Protocol
-        =============================
-        Press CTRL + C to Exit"
-        
-        read -p "Input Options: " dn1
-        case $dn1 in
-            1)
-                clear
-                nsd=$(cat /etc/kaizensc/slowdns/nameserver 2>/dev/null || echo "No nameserver found.")
-                clear
-                echo -e "
-                =================
-                Change Nameserver
-                =================
-                Nameserver: $nsd
-                "
-                read -p "Input Nameserver: " nsdomen
-                clear
-                echo "${nsdomen}" > /etc/kaizensc/slowdns/nameserver
-                systemctl stop dnstt.service
-                systemctl disable dnstt.service
-                clear
-                
-                echo -e "[Unit]
-                Description=SlowDNS FN Project Autoscript Service
-                Documentation=https://t.me/fn_project
-                After=network.target nss-lookup.target
-
-                [Service]
-                Type=simple
-                User=root
-                CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_BIND_SERVICE
-                AmbientCapabilities=CAP_NET_ADMIN CAP_NET_BIND_SERVICE
-                NoNewPrivileges=true
-                ExecStart=/etc/kaizensc/slowdns/dnstt-server -udp :5300 -privkey-file /etc/kaizensc/slowdns/server.key $nsdomen 127.0.0.1:109
-                Restart=on-failure
-
-                [Install]
-                WantedBy=multi-user.target" > /etc/systemd/system/dnstt.service
-                systemctl daemon-reload
-                systemctl enable dnstt
-                systemctl start dnstt
-                clear
-                iptables -I INPUT -p udp --dport 5300 -j ACCEPT
-                iptables -t nat -I PREROUTING -i eth0 -p udp --dport 53 -j REDIRECT --to-ports 5300
-                iptables -I INPUT -p udp --dport 5300 -j ACCEPT
-                iptables -t nat -I PREROUTING -i eth0 -p udp --dport 53 -j REDIRECT --to-ports 5300
-                clear
-                echo -e "
-                Success Change Nameserver DNSTT
-                ===============================
-                New Nameserver: $nsdomen
-                ==============================="
-                ;;
-            2)
-                clear
-                systemctl stop dnstt.service
-                systemctl disable dnstt.service
-                clear
-                chmod +x /etc/kaizensc/slowdns/dns-server
-                /etc/kaizensc/slowdns/dnstt-server -gen-key -privkey-file /etc/kaizensc/slowdns/server.key -pubkey-file /etc/kaizensc/slowdns/server.pub
-                systemctl daemon-reload
-                systemctl enable dnstt.service
-                systemctl start dnstt.service
-                clear
-                echo -e "
-                Success Renew Public Key & Server Key Slowdns
-                ============================================="
-                ;;
-            3)
-                clear
-                systemctl daemon-reload
-                systemctl restart dnstt.service
-                systemctl restart fastdns.service
-                systemctl restart dnstt-client.service
-                clear
-                echo -e "
-                Success Restart SlowDNS
-                ========================"
-                ;;
-	    4)
- 	        clear
- 	        setup-fastdns
-	        ;;
-            0)
-                menu-udp
-                ;;
-            *)
-                clear
-                mna89
-                ;;
-        esac
-    }
-    mna89
-
-__KZN_MENU_DNSTT__
-chmod 0755 "$RERE/menu-dnstt"
-bash -n "$RERE/menu-dnstt"
-
-[[ -f "$RERE/menu" ]] && cp -a "$RERE/menu" "$BACKUP/rere/menu" || true
-cat > "$RERE/menu" <<'__KZN_MENU__'
-#!/usr/bin/env bash
-
-clear
-
-# === COLOUR ===
-export red='\033[0;31m'
-export NC='\033[0m'
-export cyan='\e[0;36m'
-export green='\e[0;32m'
-RED='\e[0;31m'
-GREEN='\e[0;32m'
-YELLOW='\e[0;33m'
-CYAN="\e[0;36m"
-WHITE='\e[0;97m'
-red='\e[0;31m'
-green='\e[0;32m'
-yellow='\e[0;33m'
-cyan="\e[0;36m"
-white='\e[0;97m'
-plain='\e[0m'
-bgPutih="\e[0;47;30m"
-keatas="${CYAN}│${plain}"
-keatas2="${CYAN}║${plain}"
-
-# === RAINBOW LINE ===
-function cmd()
-{
-  printf "  "
-  for i in {52..57} {57..52}
-  do
-  printf "\e[38;5;${i}m────\e[0m"
-  done
-  echo
-}
-
-# main data
-domain=$(cat /etc/xray/domain)
-
-# system data
-ml=$(lsb_release -ds 2>/dev/null || true)
-[[ -z "$ml" && -r /etc/os-release ]] && ml=$(. /etc/os-release; printf '%s' "${PRETTY_NAME:-$NAME}")
-ml=${ml:-Unknown}
-tram=$(free -m 2>/dev/null | awk 'NR==2 {print $2}')
-tram=${tram:-0}
-
-# VPS network/location details
-vps_ip=$(tr -d '\r\n' < /root/.ip 2>/dev/null || true)
-[[ -n "$vps_ip" ]] || vps_ip=$(curl -4 -fsS --max-time 4 ipinfo.io/ip 2>/dev/null || true)
-vps_ip=${vps_ip:-Unknown}
-country=$(tr -d '\r\n' < /root/.country 2>/dev/null || true)
-if [[ -z "$country" ]]; then
-  if command -v jq >/dev/null 2>&1; then
-    country=$(curl -4 -fsS --max-time 4 https://ipwho.is/ 2>/dev/null | jq -r '.country // empty' 2>/dev/null || true)
+now=$(date +%s)
+mapfile -t active < <(get_passwords)
+changed=0
+while IFS=$'\t' read -r pass exp; do
+  [[ -n "$pass" && -n "$exp" ]] || continue
+  epoch=$(date -d "$exp" +%s 2>/dev/null || echo 0)
+  if ((epoch>0 && epoch<=now)); then
+    new=()
+    for p in "${active[@]}"; do [[ "$p" == "$pass" ]] || new+=("$p"); done
+    active=("${new[@]}")
+    jq --arg p "$pass" 'del(.[]|select(.password==$p))' "$PASSWORD_DB" > "$PASSWORD_DB.tmp" && mv "$PASSWORD_DB.tmp" "$PASSWORD_DB"
+    changed=1
   fi
-  [[ -n "$country" ]] || country=$(curl -4 -fsS --max-time 4 ipinfo.io/country 2>/dev/null || true)
-fi
-country=${country:-Unknown}
+done < <(jq -r '.[]|[.password,.expired]|@tsv' "$PASSWORD_DB" 2>/dev/null)
+((changed)) && update_passwords "${active[@]}"
 
-# Uptime since last reboot, shown as total hours + minutes.
-uptime_seconds=$(awk '{print int($1)}' /proc/uptime 2>/dev/null || echo 0)
-[[ "$uptime_seconds" =~ ^[0-9]+$ ]] || uptime_seconds=0
-uptime_hours=$((uptime_seconds / 3600))
-uptime_minutes=$(((uptime_seconds % 3600) / 60))
-uptime_text="${uptime_hours} hours, ${uptime_minutes} minutes"
-
-# server ping
-url=$(cat /etc/kaizensc/url/ping.url)
-
-ping=$(ping_result=$(ping -c 1 $url | grep -oP 'time=\K\d+\.\d+')
-if (( $(echo "$ping_result < 100" | bc -l) )); then
-    echo -e "\e[0;32m$ping_result ms\e[0m"
-elif (( $(echo "$ping_result < 200" | bc -l) )); then
-    echo -e "\e[0;33m$ping_result ms\e[0m"
-else
-    echo -e "\e[0;31m$ping_result ms\e[0m"
-fi)
-
-    # URL permission configuration
-    PERMISSION_URL="https://kznsc.kznvpn.com/izin.txt"
-    LOCAL_IP=$(cat /root/.ip) # Getting the local IP address
-
-    # Function to calculate remaining time
-    calculate_remaining_days() {
-        local today=$(date +%s)
-        local expired_date=$(date -d "$1" +%s 2>/dev/null)
-        if [ $? -ne 0 ]; then
-            echo "Invalid expiration date."
-            exit 1
-        fi
-        echo $(( (expired_date - today) / 86400 ))
-    }
-
-    # Getting permission and validation
-    clear
-    PERMISSION_DATA=$(curl -s "$PERMISSION_URL" || { echo "Failed to obtain permission."; exit 1; })
-
-    # Match data based on the local IP address.
-    MATCH=$(echo "$PERMISSION_DATA" | grep "###" | grep "$LOCAL_IP")
-    if [ -z "$MATCH" ]; then
-        echo "Your IP doesn’t have on database"
-        exit 1
-    fi
-
-    # Extract data from the matching row.
-    CLIENT_NAME=$(echo "$MATCH" | awk '{print $2}')
-    CLIENT_IP=$(echo "$MATCH" | awk '{print $3}')
-    EXP_DATE=$(echo "$MATCH" | awk '{print $5}')
-
-    # Validate active period
-    DAYS_LEFT=$(calculate_remaining_days "$EXP_DATE")
-    if [ "$DAYS_LEFT" -lt 0 ]; then
-        echo "The permission has expired."
-        exit 1
-    fi
-
-# data isp
-isp=$(tr -d '\r\n' < /root/.isp 2>/dev/null || true)
-isp=${isp:-Unknown}
-
-# Detail Badwidth
-clear
-
-# Function to read vnstat data
-read_vnstat_usage() {
-  local interface=$1
-  local today=$(vnstat -i "$interface" | grep "today" | awk '{print $8" "$9}')
-  local yesterday=$(vnstat -i "$interface" | grep "yesterday" | awk '{print $8" "$9}')
-  local this_month=$(vnstat -i "$interface" -m | grep "$(date +"%b '%y")" | awk '{print $9" "$10}')
-  
-  echo "$today;$yesterday;$this_month"
-}
-
-# Function to convert to MB unit
-convert_to_mb() {
-  local value=$1
-  local unit=$2
-  
-  case $unit in
-    B) echo "scale=6; $value / 1048576" | bc ;;
-    KiB) echo "scale=6; $value / 1024" | bc ;;
-    MiB) echo "$value" ;;
-    GiB) echo "scale=6; $value * 1024" | bc ;;
-    TiB) echo "scale=6; $value * 1048576" | bc ;;
-    *) echo "0" ;;
-  esac
-}
-
-# Get all interfaces
-all_interfaces=$(vnstat --iflist | sed 's/Available interfaces: //')
-if [ -z "$all_interfaces" ]; then
-  echo "There are no interfaces available in vnstat."
-  exit 1
-fi
-
-total_today=0
-total_yesterday=0
-total_month=0
-
-for iface in $all_interfaces; do
-  echo "“Processing interface: $iface"
-  result=$(read_vnstat_usage "$iface")
-  echo "Result for $iface: $result"
-  
-  today=$(echo "$result" | awk -F';' '{print $1}')
-  yesterday=$(echo "$result" | awk -F';' '{print $2}')
-  month=$(echo "$result" | awk -F';' '{print $3}')
-  
-  today_value=$(echo "$today" | awk '{print $1}')
-  today_unit=$(echo "$today" | awk '{print $2}')
-  
-  yesterday_value=$(echo "$yesterday" | awk '{print $1}')
-  yesterday_unit=$(echo "$yesterday" | awk '{print $2}')
-  
-  month_value=$(echo "$month" | awk '{print $1}')
-  month_unit=$(echo "$month" | awk '{print $2}')
-  
-  total_today=$(echo "$total_today + $(convert_to_mb $today_value $today_unit)" | bc)
-  total_yesterday=$(echo "$total_yesterday + $(convert_to_mb $yesterday_value $yesterday_unit)" | bc)
-  total_month=$(echo "$total_month + $(convert_to_mb $month_value $month_unit)" | bc)
-done
-
-# Format result
-format_usage() {
-  local value=$1
-  if (( $(echo "$value >= 1024" | bc -l) )); then
-    echo "$(printf "%.2f" $(echo "$value / 1024" | bc)) GB"
-  else
-    echo "$(printf "%.2f" $value) MB"
-  fi
-}
-
-ttoday=$(format_usage "$total_today")
-tyest=$(format_usage "$total_yesterday")
-tmon=$(format_usage "$total_month")
-
-count_kaizen_ssh_accounts() {
-  local db='/etc/kaizensc/database/ssh/database.json' user entry uid count=0
-  [[ -s "$db" ]] || { echo 0; return; }
-  command -v jq >/dev/null 2>&1 || { echo 0; return; }
-  while IFS= read -r user; do
-    [[ -n "$user" ]] || continue
-    entry=$(getent passwd "$user" 2>/dev/null || true)
-    [[ -n "$entry" ]] || continue
-    uid=$(printf '%s' "$entry" | awk -F: '{print $3}')
-    [[ "$uid" =~ ^[0-9]+$ ]] || continue
-    (( uid >= 1000 && uid != 65534 )) || continue
-    ((count+=1))
-  done < <(jq -r '.[].Username // empty' "$db" 2>/dev/null | sort -u)
-  echo "$count"
-}
-
-# Total account
-xrayvless=$(xray-account count vless 2>/dev/null || echo 0)
-xrayvmess=$(xray-account count vmess 2>/dev/null || echo 0)
-xraytrojan=$(xray-account count trojan 2>/dev/null || echo 0)
-ssc=$(grep -c "###" /etc/shadowsocks-libev/akun.conf 2>/dev/null || true)
-sshd=$(count_kaizen_ssh_accounts)
-
-clear
-echo -e ""
-echo -e "${CYAN}┌─────────────────────────────────────────────────┐${plain}"
-echo -e "${keatas} ${bgPutih}               • VPN PANEL MENU •              ${plain} ${keatas}"
-echo -e "${CYAN}└─────────────────────────────────────────────────┘${plain}"
-echo -e "${white}  OS               : $ml"
-echo -e "${white}  RAM              : $tram MB"
-echo -e "${white}  ISP              : $isp"
-echo -e "${white}  IP               : $vps_ip"
-echo -e "${white}  Domain           : $domain"
-echo -e "${white}  Country          : $country"
-echo -e "${white}  Uptime           : ${YELLOW}$uptime_text${white}"
-echo -e "${white}  Usage Today      : ${GREEN}$ttoday${white}"
-echo -e "${white}  Usage Yesterday  : ${GREEN}$tyest${white}"
-echo -e "${white}  Usage Monthly    : ${GREEN}$tmon${NC}"
-echo -e "${CYAN}┌─────────────────────────────────────────────────┐${plain}"
-echo -e "${keatas} ${bgPutih}                • TOTAL ACCOUNT •              ${plain} ${keatas}"
-echo -e "${CYAN}└─────────────────────────────────────────────────┘${plain}"
-printf "${white}     %-12s : %s   %-12s : %s\n" "SSH/Dropbear" "$sshd" "Xray VLESS" "$xrayvless"
-printf "${white}     %-12s : %s   %-12s : %s\n" "Xray VMess" "$xrayvmess" "Xray Trojan" "$xraytrojan"
-printf "${white}     %-12s : %s\n" "Shadowsocks" "$ssc"
-echo -e "${CYAN}┌─────────────────────────────────────────────────┐${plain}"
-echo -e "${keatas} ${bgPutih}                  • MENU LIST •                ${plain} ${keatas}"
-echo -e "${CYAN}└─────────────────────────────────────────────────┘${plain}"
-echo -e "  ${CYAN}[ 1 ]${plain} ${white}Menu SSH${plain}          ${CYAN}[ 6 ]${plain} ${white}Menu Wireguard${plain}"
-echo -e "  ${CYAN}[ 2 ]${plain} ${white}Menu Vless${plain}        ${CYAN}[ 7 ]${plain} ${white}Menu ZiVPN${plain}"
-echo -e "  ${CYAN}[ 3 ]${plain} ${white}Menu Vmess${plain}        ${CYAN}[ 8 ]${plain} ${white}Extra Protocol${plain}"
-echo -e "  ${CYAN}[ 4 ]${plain} ${white}Menu Trojan${plain}       ${CYAN}[ 9 ]${plain} ${white}Menu System VPS${plain}"
-echo -e "  ${CYAN}[ 5 ]${plain} ${white}Menu Shadowsocks${plain}  ${CYAN}[ x ]${plain} ${white}Exit${plain}"
-cmd
-echo -e "${white}  Username   : ${GREEN}$CLIENT_NAME${white}"
-echo -e "${white}  IP Address : ${GREEN}$CLIENT_IP"
-echo -e "${white}  Expire     : ${GREEN}$EXP_DATE${white} [ ${YELLOW}${DAYS_LEFT} ${white}days left ]${NC}"
-cmd
-read -p "  Input Option [1-9 or x]: " lahiya
-case $lahiya in
-1|01) clear ; menu-ssh ;;
-2|02) clear ; menu-vless ;;
-3|03) clear ; menu-vmess ;;
-4|04) clear ; menu-trojan ;;
-5|05) clear ; menu-ss ;;
-6|06) clear ; menu-wgcf ;;
-7|07) clear ; menu-udp-zivpn ;;
-8|08) clear ; menu-udp ;;
-9|09) clear ; menu-system ;;
-x|X) exit ;;
-*) clear ; menu ;;
-esac
-
-__KZN_MENU__
-chmod 0755 "$RERE/menu"
-bash -n "$RERE/menu"
+__KZN_ZIVPN_EXPIRED__
+chmod 0755 "$RERE/zivpn-expired"
+bash -n "$RERE/zivpn-expired"
 
 
-# Persistent Wireguard expiry cleanup.
-[[ -f /etc/crontab ]] && cp -a /etc/crontab "$BACKUP/crontab" || true
-if [[ -f /etc/crontab ]] && ! grep -q '/usr/local/rere/xp-wireguard' /etc/crontab; then
-  echo '*/15 * * * * root /usr/local/rere/xp-wireguard >/dev/null 2>&1' >> /etc/crontab
-fi
-systemctl restart cron >/dev/null 2>&1 || true
-
-# Preserve current text-brightness selection; default to Normal if no state exists.
 mkdir -p /etc/kaizensc
 [[ -s /etc/kaizensc/text-brightness.conf ]] || printf 'normal\n' > /etc/kaizensc/text-brightness.conf
 
-# Runtime UI sanity checks.
 source "$RERE/kaizen-ui"
-for fn in kaizen_xray_table_header kaizen_xray_table_row kaizen_unlock_table_header kaizen_unlock_table_row; do
+for fn in kaizen_expiry_help kaizen_parse_expiry kaizen_rainbow_line; do
   declare -F "$fn" >/dev/null || { echo "Missing UI helper: $fn"; exit 1; }
 done
 
 echo
 echo "Patch installed successfully."
 echo "Backup: $BACKUP"
-echo "Main changes: SSH/Xray lock-unlock, Shadowsocks, Wireguard manager, ZiVPN UI, Extra Protocol/FastDNS, UDP menus, port detail and rebuild reboot flow."
+echo "Lock reason is automatic Manual."
+echo "Create/Extend expiry accepts days, date, or exact datetime."
+echo "Wireguard delete and ZiVPN Extend Account are included."
