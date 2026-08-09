@@ -1,24 +1,21 @@
 #!/usr/bin/env bash
 set -euo pipefail
-
 RERE='/usr/local/rere'
 STAMP="$(date +%Y%m%d-%H%M%S)"
-BACKUP="/root/kaizensc-vps-panel-info-backup-${STAMP}"
+BACKUP="/root/kaizensc-ssh-total-list-fix-backup-${STAMP}"
 
 if [[ ${EUID:-$(id -u)} -ne 0 ]]; then
   echo "Please run this patch as root."
   exit 1
 fi
-
 [[ -d "$RERE" ]] || { echo "KaizenSC directory not found: $RERE"; exit 1; }
-
 mkdir -p "$BACKUP"
-for f in menu info; do
+for f in menu info list-ssh; do
   [[ -f "$RERE/$f" ]] && cp -a "$RERE/$f" "$BACKUP/$f"
 done
 
 
-cat > "$RERE/menu" <<'__KAIZEN_MENU_VPS_PANEL_INFO__'
+cat > "$RERE/menu" <<'__KAIZEN_MENU_SSH_FIX__'
 #!/usr/bin/env bash
 
 clear
@@ -214,12 +211,28 @@ ttoday=$(format_usage "$total_today")
 tyest=$(format_usage "$total_yesterday")
 tmon=$(format_usage "$total_month")
 
+count_kaizen_ssh_accounts() {
+  local db='/etc/kaizensc/database/ssh/database.json' user entry uid count=0
+  [[ -s "$db" ]] || { echo 0; return; }
+  command -v jq >/dev/null 2>&1 || { echo 0; return; }
+  while IFS= read -r user; do
+    [[ -n "$user" ]] || continue
+    entry=$(getent passwd "$user" 2>/dev/null || true)
+    [[ -n "$entry" ]] || continue
+    uid=$(printf '%s' "$entry" | awk -F: '{print $3}')
+    [[ "$uid" =~ ^[0-9]+$ ]] || continue
+    (( uid >= 1000 && uid != 65534 )) || continue
+    ((count+=1))
+  done < <(jq -r '.[].Username // empty' "$db" 2>/dev/null | sort -u)
+  echo "$count"
+}
+
 # Total account
 xrayvless=$(xray-account count vless 2>/dev/null || echo 0)
 xrayvmess=$(xray-account count vmess 2>/dev/null || echo 0)
 xraytrojan=$(xray-account count trojan 2>/dev/null || echo 0)
 ssc=$(grep -c "###" /etc/shadowsocks-libev/akun.conf 2>/dev/null || true)
-sshd=$(awk -F: '$3 >= 1000 && $1 != "nobody" {print $1}' /etc/passwd | wc -l)
+sshd=$(count_kaizen_ssh_accounts)
 
 clear
 echo -e ""
@@ -229,10 +242,10 @@ echo -e "${CYAN}└────────────────────�
 echo -e "${white}  OS               : $ml"
 echo -e "${white}  RAM              : $tram MB"
 echo -e "${white}  ISP              : $isp"
-echo -e "${white}  Country          : $country"
 echo -e "${white}  IP               : $vps_ip"
 echo -e "${white}  Domain           : $domain"
-echo -e "${white}  Uptime           : ${GREEN}$uptime_text${white}"
+echo -e "${white}  Country          : $country"
+echo -e "${white}  Uptime           : ${YELLOW}$uptime_text${white}"
 echo -e "${white}  Usage Today      : ${GREEN}$ttoday${white}"
 echo -e "${white}  Usage Yesterday  : ${GREEN}$tyest${white}"
 echo -e "${white}  Usage Monthly    : ${GREEN}$tmon${NC}"
@@ -270,11 +283,11 @@ x|X) exit ;;
 *) clear ; menu ;;
 esac
 
-__KAIZEN_MENU_VPS_PANEL_INFO__
+__KAIZEN_MENU_SSH_FIX__
 chmod 0755 "$RERE/menu"
 
 
-cat > "$RERE/info" <<'__KAIZEN_INFO_VPS_PANEL_INFO__'
+cat > "$RERE/info" <<'__KAIZEN_INFO_SSH_FIX__'
 #!/usr/bin/env bash
 
 # === COLOUR ===
@@ -336,6 +349,22 @@ count_xray() {
     local n
     n=$(/usr/local/rere/xray-account count "$proto" 2>/dev/null | tail -n1 | tr -dc '0-9')
     printf '%s' "${n:-0}"
+}
+
+count_kaizen_ssh_accounts() {
+  local db='/etc/kaizensc/database/ssh/database.json' user entry uid count=0
+  [[ -s "$db" ]] || { echo 0; return; }
+  command -v jq >/dev/null 2>&1 || { echo 0; return; }
+  while IFS= read -r user; do
+    [[ -n "$user" ]] || continue
+    entry=$(getent passwd "$user" 2>/dev/null || true)
+    [[ -n "$entry" ]] || continue
+    uid=$(printf '%s' "$entry" | awk -F: '{print $3}')
+    [[ "$uid" =~ ^[0-9]+$ ]] || continue
+    (( uid >= 1000 && uid != 65534 )) || continue
+    ((count+=1))
+  done < <(jq -r '.[].Username // empty' "$db" 2>/dev/null | sort -u)
+  echo "$count"
 }
 
 # === VPS INFO ===
@@ -439,7 +468,7 @@ status_shadowsocks=$(check_any_service shadowsocks-libev shadowsocks-libev.servi
 xray_vless_user=$(count_xray vless)
 xray_vmess_user=$(count_xray vmess)
 xray_trojan_user=$(count_xray trojan)
-ssh_dropbear_user=$(awk -F: '$3 >= 1000 && $1 != "nobody" && $7 !~ /(nologin|false)$/ {n++} END{print n+0}' /etc/passwd 2>/dev/null)
+ssh_dropbear_user=$(count_kaizen_ssh_accounts)
 ss_user=$(grep -c '###' /etc/shadowsocks-libev/akun.conf 2>/dev/null || true)
 ssh_dropbear_user=${ssh_dropbear_user:-0}
 ss_user=${ss_user:-0}
@@ -453,10 +482,10 @@ echo -e "${CYAN}└────────────────────�
 echo -e "${white}  OS               : $OS"
 echo -e "${white}  RAM              : ${RAM} MB"
 echo -e "${white}  ISP              : $ISP"
-echo -e "${white}  Country          : $COUNTRY"
 echo -e "${white}  IP               : $VPS_IP"
 echo -e "${white}  Domain           : $DOMAIN"
-echo -e "${white}  Uptime           : ${GREEN}$UPTIME_TEXT${white}"
+echo -e "${white}  Country          : $COUNTRY"
+echo -e "${white}  Uptime           : ${YELLOW}$UPTIME_TEXT${white}"
 echo -e "${white}  Usage Today      : ${GREEN}$ttoday${white}"
 echo -e "${white}  Usage Yesterday  : ${GREEN}$tyest${white}"
 echo -e "${white}  Usage Monthly    : ${GREEN}$tmon${NC}"
@@ -487,14 +516,137 @@ cmd
 echo -e "            ${white} To access, use ${GREEN}menu${NC} command"
 cmd
 
-__KAIZEN_INFO_VPS_PANEL_INFO__
+__KAIZEN_INFO_SSH_FIX__
 chmod 0755 "$RERE/info"
 
 
-bash -n "$RERE/menu"
-bash -n "$RERE/info"
+cat > "$RERE/list-ssh" <<'__KAIZEN_LIST_SSH_SSH_FIX__'
+#!/usr/bin/env bash
+source /usr/local/rere/kaizen-ui 2>/dev/null || true
+set -u
+DB="/etc/kaizensc/database/ssh/database.json"
+AUTH_TMP=$(mktemp /tmp/ssh-member-auth.XXXXXX)
+trap 'rm -f "$AUTH_TMP"' EXIT
+{
+  [[ -r /var/log/auth.log ]] && tail -n 30000 /var/log/auth.log
+  [[ -r /var/log/secure ]] && tail -n 30000 /var/log/secure
+  command -v journalctl >/dev/null 2>&1 && journalctl --no-pager -n 30000 -u ssh.service -u sshd.service -u dropbear.service 2>/dev/null
+} > "$AUTH_TMP"
+
+[[ -s "$DB" ]] || { echo 'No SSH accounts found.'; exit 0; }
+
+is_kaizen_ssh_user(){
+  local u="$1" entry uid
+  entry=$(getent passwd "$u" 2>/dev/null || true)
+  [[ -n "$entry" ]] || return 1
+  uid=$(printf '%s' "$entry" | awk -F: '{print $3}')
+  [[ "$uid" =~ ^[0-9]+$ ]] || return 1
+  (( uid >= 1000 && uid != 65534 ))
+}
+
+get_limit(){
+  local u=$1 v
+  v=$(jq -r --arg u "$u" '.[] | select(.Username==$u) | .LimitIP // 0' "$DB" 2>/dev/null | head -n1)
+  [[ "$v" =~ ^[0-9]+$ ]] || v=0
+  (( v > 0 )) && echo "$v" || echo 'Unlimited'
+}
+
+active_pids(){
+  local u=$1
+  ps -eo pid=,args= 2>/dev/null | awk -v u="$u" '
+    index($0,"sshd: "u"@") {print $1}
+  '
+  while read -r pid; do
+    [[ -n "$pid" ]] || continue
+    if grep -F "dropbear[$pid]" "$AUTH_TMP" 2>/dev/null | grep -Eq "(for|user) ['\"]?$u['\"]?|['\"]$u['\"]"; then echo "$pid"; fi
+  done < <(pgrep -x dropbear 2>/dev/null || true)
+}
+
+session_count(){
+  local u=$1 n who_n
+  n=$(active_pids "$u" | sort -u | awk 'NF{n++} END{print n+0}')
+  who_n=$(who 2>/dev/null | awk -v u="$u" '$1==u {n++} END{print n+0}')
+  (( who_n > n )) && n=$who_n
+  echo "$n"
+}
+
+active_ip_count(){
+  local u=$1 pid ips n sessions
+  ips=''
+  while read -r pid; do
+    [[ -n "$pid" ]] || continue
+    # Match successful authentication line for the active child PID.
+    ip=$(grep -F "[$pid]" "$AUTH_TMP" 2>/dev/null | grep -Ei "Accepted|auth succeeded|Password auth succeeded|Pubkey auth succeeded" | tail -n1 | sed -nE 's/.* from ([0-9a-fA-F:.]+)( port [0-9]+)?.*/\1/p')
+    [[ -n "${ip:-}" && "$ip" != 127.0.0.1 && "$ip" != ::1 ]] && ips+="$ip"$'\n'
+  done < <(active_pids "$u")
+  # Interactive sessions often expose the real host through who(1).
+  ips+=$(who 2>/dev/null | awk -v u="$u" '$1==u {print $NF}' | tr -d '()')$'\n'
+  n=$(printf '%s' "$ips" | awk 'NF && $0!="127.0.0.1" && $0!="::1" && !seen[$0]++{n++} END{print n+0}')
+  sessions=$(session_count "$u")
+  # For WebSocket/localhost proxy sessions the true peer can be hidden. In that case
+  # session count is the safest current-login fallback.
+  (( n == 0 && sessions > 0 )) && n=$sessions
+  echo "$n"
+}
+
+last_login(){
+  local u=$1 raw
+  raw=$(grep -Ei "Accepted .* for ${u} |Password auth succeeded.*['\"]${u}['\"]|Pubkey auth succeeded.*['\"]${u}['\"]" "$AUTH_TMP" 2>/dev/null | tail -n1)
+  if [[ -n "$raw" ]]; then
+    # journalctl lines normally begin with 'Mon DD HH:MM:SS'; auth.log may too.
+    ts=$(echo "$raw" | awk '{print $1" "$2" "$3}')
+    date -d "$ts" '+%F %T' 2>/dev/null || echo "$ts"
+  else
+    last -F "$u" 2>/dev/null | awk '$1==u && $0 !~ /wtmp begins/ {print $4" "$5" "$6" "$7" "$8; exit}' u="$u" | sed 's/^$/Never/'
+  fi
+}
+
+clear
+kaizen_header " • List SSH Account • "
+jq -r '.[] | [.Username, (.LimitIP // "0"), (.Expired // "Lifetime")] | @tsv' "$DB" 2>/dev/null |
+while IFS=$'\t' read -r user limit exp; do
+  [[ -n "$user" ]] || continue
+  is_kaizen_ssh_user "$user" || continue
+  [[ "$limit" =~ ^[0-9]+$ ]] || limit=0
+  (( limit > 0 )) && ltxt="$limit" || ltxt='Unlimited'
+  echo '━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━'
+  echo
+  printf 'Username     : %s\n' "$user"
+  printf 'IP Limit     : %s\n' "$ltxt"
+  printf 'Expire Date  : %s\n' "$exp"
+  echo '━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━'
+done
+
+echo
+read -rp 'Enter username to view detailed information (blank = back): ' wanted
+[[ -n "${wanted:-}" ]] || exit 0
+row=$(jq -r --arg u "$wanted" '.[] | select(.Username==$u) | [.Username, (.LimitIP // "0"), (.Expired // "Lifetime")] | @tsv' "$DB" 2>/dev/null | head -n1)
+[[ -n "$row" ]] || { echo '[ERROR] Account not found.'; exit 1; }
+IFS=$'\t' read -r user limit exp <<< "$row"
+is_kaizen_ssh_user "$user" || { echo '[ERROR] Account is not a KaizenSC SSH user.'; exit 1; }
+[[ "$limit" =~ ^[0-9]+$ ]] || limit=0
+(( limit > 0 )) && ltxt="$limit" || ltxt='Unlimited'
+current=$(active_ip_count "$user")
+if (( current > 0 )); then status=ONLINE; scol='\033[0;32m'; else status=OFFLINE; scol='\033[0;31m'; fi
+lastlog=$(last_login "$user")
+clear
+kaizen_header " • SSH User Login • "
+printf 'User       : %s\n' "$user"
+printf 'Status     : %b%s%b\n' "$scol" "$status" '\033[0m'
+printf 'Current IP : %s / %s\n' "$current" "$ltxt"
+printf 'Last Login : %s\n' "$lastlog"
+
+__KAIZEN_LIST_SSH_SSH_FIX__
+chmod 0755 "$RERE/list-ssh"
+
+
+for f in menu info list-ssh; do
+  bash -n "$RERE/$f"
+done
 
 echo
 echo "Patch installed successfully."
 echo "Backup: $BACKUP"
-echo "VPS Panel now shows OS, RAM, ISP, Country, IP, Domain, Uptime, and bandwidth usage."
+echo "- SSH totals in menu/info now use the same KaizenSC SSH database validation."
+echo "- System accounts such as syslog/nobody are hidden from List SSH Account."
+echo "- Country is below Domain and Uptime is yellow."
