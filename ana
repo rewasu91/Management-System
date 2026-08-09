@@ -2,7 +2,7 @@
 set -euo pipefail
 RERE=/usr/local/rere
 STAMP="$(date +%Y%m%d-%H%M%S)"
-BACKUP="/root/kaizensc-total-junction-backup-${STAMP}"
+BACKUP="/root/kaizensc-xray-table-helper-backup-${STAMP}"
 [[ ${EUID:-$(id -u)} -eq 0 ]] || { echo "Please run as root."; exit 1; }
 [[ -d "$RERE" ]] || { echo "KaizenSC not found: $RERE"; exit 1; }
 mkdir -p "$BACKUP"
@@ -148,6 +148,33 @@ kaizen_ssh_table_footer(){
  printf '%b└%s┴%s┴%s┘%b\n' "$c" "$a" "$b" "$d" "$r"
 }
 
+kaizen_xray_table_header(){
+ local proto="${1:-}" c r bg='\e[0;47;30m' a b q d
+ kaizen_xray_table_prepare "$proto"
+ c=$(kaizen_table_colour); r=$(kaizen_reset)
+ a=$(kaizen_repeat_line '─' $((KZN_XRAY_USER_W+2)))
+ b=$(kaizen_repeat_line '─' $((KZN_XRAY_EXP_W+2)))
+ q=$(kaizen_repeat_line '─' $((KZN_XRAY_QUOTA_W+2)))
+ d=$(kaizen_repeat_line '─' $((KZN_XRAY_IP_W+2)))
+ printf '%b┌%s┬%s┬%s┬%s┐%b\n' "$c" "$a" "$b" "$q" "$d" "$r"
+ printf '%b│%b%b %-*s %b%b│%b%b %-*s %b%b│%b%b %-*s %b%b│%b%b %-*s %b%b│%b\n' \
+   "$c" "$r" "$bg" "$KZN_XRAY_USER_W" Username "$r" "$c" \
+   "$r" "$bg" "$KZN_XRAY_EXP_W" "Expire Date" "$r" "$c" \
+   "$r" "$bg" "$KZN_XRAY_QUOTA_W" Quota "$r" "$c" \
+   "$r" "$bg" "$KZN_XRAY_IP_W" IP "$r" "$c" "$r"
+ printf '%b├%s┼%s┼%s┼%s┤%b\n' "$c" "$a" "$b" "$q" "$d" "$r"
+}
+kaizen_xray_table_row(){
+ local c w r exp
+ c=$(kaizen_table_colour); w=$(kaizen_text_colour); r=$(kaizen_reset)
+ exp="${2%% *}"
+ printf '%b│%b %-*s %b│%b %-*s %b│%b %-*s %b│%b %-*s %b│%b\n' \
+   "$c" "$w" "$KZN_XRAY_USER_W" "$1" "$c" \
+   "$w" "$KZN_XRAY_EXP_W" "$exp" "$c" \
+   "$w" "$KZN_XRAY_QUOTA_W" "$3" "$c" \
+   "$w" "$KZN_XRAY_IP_W" "$4" "$c" "$r"
+}
+
 kaizen_xray_table_total_row(){
   local total="$1" c w y r inner
   c=$(kaizen_table_colour); w=$(kaizen_text_colour); y=$(kaizen_yellow); r=$(kaizen_reset)
@@ -174,141 +201,26 @@ __KZN_KAIZEN_UI__
 chmod 0755 "$RERE/kaizen-ui"
 bash -n "$RERE/kaizen-ui"
 
-[[ -f "$RERE/list-ssh" ]] && cp -a "$RERE/list-ssh" "$BACKUP/list-ssh" || true
-cat > "$RERE/list-ssh" <<'__KZN_LIST_SSH__'
-#!/usr/bin/env bash
-source /usr/local/rere/kaizen-ui 2>/dev/null || true
-set -u
-DB="/etc/kaizensc/database/ssh/database.json"
-AUTH_TMP=$(mktemp /tmp/ssh-member-auth.XXXXXX)
-trap 'rm -f "$AUTH_TMP"' EXIT
-{
-  [[ -r /var/log/auth.log ]] && tail -n 30000 /var/log/auth.log
-  [[ -r /var/log/secure ]] && tail -n 30000 /var/log/secure
-  command -v journalctl >/dev/null 2>&1 && journalctl --no-pager -n 30000 -u ssh.service -u sshd.service -u dropbear.service 2>/dev/null
-} > "$AUTH_TMP"
-
-[[ -s "$DB" ]] || { echo 'No SSH accounts found.'; exit 0; }
-
-is_kaizen_ssh_user(){
-  local u="$1" entry uid
-  entry=$(getent passwd "$u" 2>/dev/null || true)
-  [[ -n "$entry" ]] || return 1
-  uid=$(printf '%s' "$entry" | awk -F: '{print $3}')
-  [[ "$uid" =~ ^[0-9]+$ ]] || return 1
-  (( uid >= 1000 && uid != 65534 ))
-}
-
-get_limit(){
-  local u=$1 v
-  v=$(jq -r --arg u "$u" '.[] | select(.Username==$u) | .LimitIP // 0' "$DB" 2>/dev/null | head -n1)
-  [[ "$v" =~ ^[0-9]+$ ]] || v=0
-  (( v > 0 )) && echo "$v" || echo 'Unlimited'
-}
-
-active_pids(){
-  local u=$1
-  ps -eo pid=,args= 2>/dev/null | awk -v u="$u" '
-    index($0,"sshd: "u"@") {print $1}
-  '
-  while read -r pid; do
-    [[ -n "$pid" ]] || continue
-    if grep -F "dropbear[$pid]" "$AUTH_TMP" 2>/dev/null | grep -Eq "(for|user) ['\"]?$u['\"]?|['\"]$u['\"]"; then echo "$pid"; fi
-  done < <(pgrep -x dropbear 2>/dev/null || true)
-}
-
-session_count(){
-  local u=$1 n who_n
-  n=$(active_pids "$u" | sort -u | awk 'NF{n++} END{print n+0}')
-  who_n=$(who 2>/dev/null | awk -v u="$u" '$1==u {n++} END{print n+0}')
-  (( who_n > n )) && n=$who_n
-  echo "$n"
-}
-
-active_ip_count(){
-  local u=$1 pid ips n sessions
-  ips=''
-  while read -r pid; do
-    [[ -n "$pid" ]] || continue
-    # Match successful authentication line for the active child PID.
-    ip=$(grep -F "[$pid]" "$AUTH_TMP" 2>/dev/null | grep -Ei "Accepted|auth succeeded|Password auth succeeded|Pubkey auth succeeded" | tail -n1 | sed -nE 's/.* from ([0-9a-fA-F:.]+)( port [0-9]+)?.*/\1/p')
-    [[ -n "${ip:-}" && "$ip" != 127.0.0.1 && "$ip" != ::1 ]] && ips+="$ip"$'\n'
-  done < <(active_pids "$u")
-  # Interactive sessions often expose the real host through who(1).
-  ips+=$(who 2>/dev/null | awk -v u="$u" '$1==u {print $NF}' | tr -d '()')$'\n'
-  n=$(printf '%s' "$ips" | awk 'NF && $0!="127.0.0.1" && $0!="::1" && !seen[$0]++{n++} END{print n+0}')
-  sessions=$(session_count "$u")
-  # For WebSocket/localhost proxy sessions the true peer can be hidden. In that case
-  # session count is the safest current-login fallback.
-  (( n == 0 && sessions > 0 )) && n=$sessions
-  echo "$n"
-}
-
-last_login(){
-  local u=$1 raw ts fallback
-  raw=$(grep -Ei "Accepted .* for ${u} |Password auth succeeded.*['\"]${u}['\"]|Pubkey auth succeeded.*['\"]${u}['\"]" "$AUTH_TMP" 2>/dev/null | tail -n1)
-  if [[ -n "$raw" ]]; then
-    ts=$(echo "$raw" | awk '{print $1" "$2" "$3}')
-    date -d "$ts" '+%F %T' 2>/dev/null || printf '%s\n' "$ts"
-    return
-  fi
-  fallback=$(last -F "$u" 2>/dev/null | awk -v u="$u" '$1==u && $0 !~ /wtmp begins/ {print $4" "$5" "$6" "$7" "$8; exit}')
-  if [[ -z "$fallback" || "$fallback" =~ ^[Nn]ever ]]; then
-    printf 'Never\n'
-  else
-    printf '%s\n' "$fallback"
-  fi
-}
-
-clear
-kaizen_header " • List SSH Account • "
-kaizen_ssh_table_header
-total_users=0
-while IFS=$'\t' read -r user limit exp; do
-  [[ -n "$user" ]] || continue
-  kaizen_is_ssh_account_user "$user" || continue
-  [[ "$limit" =~ ^[0-9]+$ ]] || limit=0
-  (( limit > 0 )) && ltxt="$limit" || ltxt='UL'
-  kaizen_ssh_table_row "$user" "$exp" "$ltxt"
-  total_users=$((total_users + 1))
-done < <(jq -r '.[] | [.Username, (.LimitIP // "0"), (.Expired // "Lifetime")] | @tsv' "$DB" 2>/dev/null)
-kaizen_ssh_table_total_row "$total_users"
-
-echo
-read -rp 'Enter username to view detailed information (blank = back): ' wanted
-[[ -n "${wanted:-}" ]] || exit 0
-row=$(jq -r --arg u "$wanted" '.[] | select(.Username==$u) | [.Username, (.LimitIP // "0"), (.Expired // "Lifetime")] | @tsv' "$DB" 2>/dev/null | head -n1)
-[[ -n "$row" ]] || { echo '[ERROR] Account not found.'; exit 1; }
-IFS=$'\t' read -r user limit exp <<< "$row"
-kaizen_is_ssh_account_user "$user" || { echo '[ERROR] Account is not a KaizenSC SSH user.'; exit 1; }
-[[ "$limit" =~ ^[0-9]+$ ]] || limit=0
-(( limit > 0 )) && ltxt="$limit" || ltxt='UL'
-current=$(active_ip_count "$user")
-if (( current > 0 )); then status=ONLINE; scol=$(kaizen_green); else status=OFFLINE; scol=$(kaizen_red); fi
-lastlog=$(last_login "$user")
-clear
-kaizen_header " • SSH User Login • "
-W=$(kaizen_text_colour); R=$(kaizen_reset)
-printf '%bUser       : %s%b
-' "$W" "$user" "$R"
-printf '%bStatus     : %b%s%b
-' "$W" "$scol" "$status" "$R"
-printf '%bCurrent IP : %s / %s%b
-' "$W" "$current" "$ltxt" "$R"
-printf '%bLast Login : %s%b
-' "$W" "$lastlog" "$R" 
-
-__KZN_LIST_SSH__
-chmod 0755 "$RERE/list-ssh"
-bash -n "$RERE/list-ssh"
-
 [[ -f "$RERE/xray-account" ]] && cp -a "$RERE/xray-account" "$BACKUP/xray-account" || true
 cat > "$RERE/xray-account" <<'__KZN_XRAY_ACCOUNT__'
 #!/usr/bin/env bash
 set -u
 
 # Shared UI helpers
-source /usr/local/rere/kaizen-ui 2>/dev/null || true
+if [[ -r /usr/local/rere/kaizen-ui ]]; then
+  source /usr/local/rere/kaizen-ui
+else
+  echo "[ERROR] KaizenSC UI helper not found: /usr/local/rere/kaizen-ui" >&2
+  exit 1
+fi
+
+for __fn in kaizen_header kaizen_xray_table_header kaizen_xray_table_row kaizen_xray_table_footer kaizen_xray_table_total_row; do
+  declare -F "$__fn" >/dev/null 2>&1 || {
+    echo "[ERROR] KaizenSC UI helper is incomplete: $__fn" >&2
+    exit 1
+  }
+done
+unset __fn
 proto_label(){ case "$1" in vless) echo Vless;; vmess) echo Vmess;; trojan) echo Trojan;; *) echo "$1";; esac; }
 action_header(){ local t="$1"; command -v kaizen_header >/dev/null 2>&1 && kaizen_header " • $t • " || { echo "=== $t ==="; echo; }; }
 result_header(){
@@ -837,4 +749,12 @@ __KZN_XRAY_ACCOUNT__
 chmod 0755 "$RERE/xray-account"
 bash -n "$RERE/xray-account"
 
-echo "Patch installed successfully. Backup: $BACKUP"
+
+source "$RERE/kaizen-ui"
+for fn in kaizen_xray_table_header kaizen_xray_table_row kaizen_xray_table_total_row kaizen_xray_table_footer; do
+  declare -F "$fn" >/dev/null || { echo "Missing helper: $fn"; exit 1; }
+done
+echo
+echo "Patch installed successfully."
+echo "Backup: $BACKUP"
+echo "Xray account table helpers restored."
