@@ -1,0 +1,125 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+OLD=/usr/local/rere
+NEW=/usr/local/kaisc
+STAMP="$(date +%Y%m%d-%H%M%S)"
+SAVE="/root/kaisc-command-rescue-${STAMP}"
+
+[[ ${EUID:-$(id -u)} -eq 0 ]] || { echo "Run this repair as root."; exit 1; }
+mkdir -p "$SAVE"
+
+if [[ ! -d "$NEW" && -d "$OLD" ]]; then
+    mv "$OLD" "$NEW"
+fi
+[[ -d "$NEW" ]] || { echo "[ERROR] /usr/local/kaisc not found."; exit 1; }
+
+mkdir -p /usr/local/bin /etc/profile.d "$SAVE/usr-local-bin"
+
+# Fix permissions and create command shims in /usr/local/bin.
+linked=0
+skipped=0
+while IFS= read -r -d '' f; do
+    first=$(sed -n '1p' "$f" 2>/dev/null || true)
+    case "$first" in
+        '#!'*)
+            chmod 0755 "$f" 2>/dev/null || true
+            name=$(basename "$f")
+            dst="/usr/local/bin/$name"
+
+            if [[ -L "$dst" ]]; then
+                cp -a "$dst" "$SAVE/usr-local-bin/$name" 2>/dev/null || true
+                ln -sfn "$f" "$dst"
+                linked=$((linked+1))
+            elif [[ ! -e "$dst" ]]; then
+                ln -s "$f" "$dst"
+                linked=$((linked+1))
+            else
+                # Preserve unrelated real binaries, e.g. /usr/local/bin/xray.
+                skipped=$((skipped+1))
+            fi
+            ;;
+    esac
+done < <(find "$NEW" -maxdepth 1 -type f -print0)
+
+# Permanent PATH.
+cat > /etc/profile.d/kaisc.sh <<'EOF'
+case ":$PATH:" in
+  *:/usr/local/kaisc:*) ;;
+  *) export PATH="/usr/local/kaisc:$PATH" ;;
+esac
+EOF
+chmod 0644 /etc/profile.d/kaisc.sh
+
+touch /root/.bashrc
+sed -i '\#PATH=/usr/local/rere:#d' /root/.bashrc
+grep -Fq 'PATH=/usr/local/kaisc:$PATH' /root/.bashrc ||
+  printf '%s\n' 'export PATH="/usr/local/kaisc:$PATH"' >> /root/.bashrc
+
+# Update current shell immediately.
+export PATH="/usr/local/kaisc:/usr/local/bin:$PATH"
+hash -r 2>/dev/null || true
+
+# Repair exact old runtime references that may remain after the previous migration.
+replace_old_path() {
+    local target="$1"
+    [[ -e "$target" ]] || return 0
+    if [[ -f "$target" ]]; then
+        grep -Iq '/usr/local/rere' "$target" 2>/dev/null &&
+          sed -i 's#/usr/local/rere#/usr/local/kaisc#g' "$target" || true
+    else
+        while IFS= read -r -d '' f; do
+            sed -i 's#/usr/local/rere#/usr/local/kaisc#g' "$f"
+        done < <(grep -RIlZ '/usr/local/rere' "$target" 2>/dev/null || true)
+    fi
+}
+
+for target in "$NEW" /usr/local/bin /usr/local/sbin /etc/systemd/system /etc/cron.d /etc/crontab /root/.bashrc /etc/profile /etc/profile.d; do
+    replace_old_path "$target"
+done
+
+# Validate shell scripts.
+fail=0
+while IFS= read -r -d '' f; do
+    first=$(sed -n '1p' "$f" 2>/dev/null || true)
+    case "$first" in
+        *bash*|*'/sh')
+            if ! bash -n "$f"; then
+                echo "[ERROR] Syntax failed: $f"
+                fail=1
+            fi
+            ;;
+    esac
+done < <(find "$NEW" -type f -print0)
+(( fail == 0 )) || exit 1
+
+# Verify critical commands resolve.
+critical=(
+  menu menu-ssh menu-vless menu-vmess menu-trojan menu-system
+  add-vless add-vmess add-trojan
+)
+missing=0
+for cmd in "${critical[@]}"; do
+    if ! command -v "$cmd" >/dev/null 2>&1; then
+        echo "[ERROR] Command still not found: $cmd"
+        missing=1
+    fi
+done
+(( missing == 0 )) || exit 1
+
+systemctl daemon-reload >/dev/null 2>&1 || true
+systemctl restart cron >/dev/null 2>&1 || systemctl restart crond >/dev/null 2>&1 || true
+systemctl restart api >/dev/null 2>&1 || true
+
+echo
+echo "KaizenSC command repair completed successfully."
+echo "Script directory : /usr/local/kaisc"
+echo "Command shims    : /usr/local/bin"
+echo "Links created    : $linked"
+echo "Real binaries preserved: $skipped"
+echo
+for cmd in "${critical[@]}"; do
+    printf '  %-16s -> %s\n' "$cmd" "$(command -v "$cmd")"
+done
+echo
+echo "Run: menu"
