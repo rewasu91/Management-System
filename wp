@@ -1,0 +1,455 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+RERE='/usr/local/rere'
+STAMP="$(date +%Y%m%d-%H%M%S)"
+BACKUP="/root/kaizensc-info-layout-backup-${STAMP}"
+
+if [[ ${EUID:-$(id -u)} -ne 0 ]]; then
+  echo "Please run this patch as root."
+  exit 1
+fi
+
+[[ -d "$RERE" ]] || { echo "KaizenSC directory not found: $RERE"; exit 1; }
+
+mkdir -p "$BACKUP"
+for f in menu info; do
+  [[ -f "$RERE/$f" ]] && cp -a "$RERE/$f" "$BACKUP/$f"
+done
+
+
+cat > "$RERE/menu" <<'__KAIZEN_MENU_LAYOUT_FIX__'
+#!/usr/bin/env bash
+
+clear
+
+# === COLOUR ===
+export red='\033[0;31m'
+export NC='\033[0m'
+export cyan='\e[0;36m'
+export green='\e[0;32m'
+RED='\e[0;31m'
+GREEN='\e[0;32m'
+YELLOW='\e[0;33m'
+CYAN="\e[0;36m"
+WHITE='\e[0;97m'
+red='\e[0;31m'
+green='\e[0;32m'
+yellow='\e[0;33m'
+cyan="\e[0;36m"
+white='\e[0;97m'
+plain='\e[0m'
+bgPutih="\e[0;47;30m"
+keatas="${CYAN}│${plain}"
+keatas2="${CYAN}║${plain}"
+
+# === RAINBOW LINE ===
+function cmd()
+{
+  printf "  "
+  for i in {52..57} {57..52}
+  do
+  printf "\e[38;5;${i}m────\e[0m"
+  done
+  echo
+}
+
+# main data
+domain=$(cat /etc/xray/domain)
+
+# system data
+ml=$(echo "$(lsb_release -ds)")
+tram=$(free -m | awk 'NR==2 {print $2}')
+
+# server ping
+url=$(cat /etc/kaizensc/url/ping.url)
+
+ping=$(ping_result=$(ping -c 1 $url | grep -oP 'time=\K\d+\.\d+')
+if (( $(echo "$ping_result < 100" | bc -l) )); then
+    echo -e "\e[0;32m$ping_result ms\e[0m"
+elif (( $(echo "$ping_result < 200" | bc -l) )); then
+    echo -e "\e[0;33m$ping_result ms\e[0m"
+else
+    echo -e "\e[0;31m$ping_result ms\e[0m"
+fi)
+
+    # URL permission configuration
+    PERMISSION_URL="https://kznsc.kznvpn.com/izin.txt"
+    LOCAL_IP=$(cat /root/.ip) # Getting the local IP address
+
+    # Function to calculate remaining time
+    calculate_remaining_days() {
+        local today=$(date +%s)
+        local expired_date=$(date -d "$1" +%s 2>/dev/null)
+        if [ $? -ne 0 ]; then
+            echo "Invalid expiration date."
+            exit 1
+        fi
+        echo $(( (expired_date - today) / 86400 ))
+    }
+
+    # Getting permission and validation
+    clear
+    PERMISSION_DATA=$(curl -s "$PERMISSION_URL" || { echo "Failed to obtain permission."; exit 1; })
+
+    # Match data based on the local IP address.
+    MATCH=$(echo "$PERMISSION_DATA" | grep "###" | grep "$LOCAL_IP")
+    if [ -z "$MATCH" ]; then
+        echo "Your IP doesn’t have on database"
+        exit 1
+    fi
+
+    # Extract data from the matching row.
+    CLIENT_NAME=$(echo "$MATCH" | awk '{print $2}')
+    CLIENT_IP=$(echo "$MATCH" | awk '{print $3}')
+    EXP_DATE=$(echo "$MATCH" | awk '{print $5}')
+
+    # Validate active period
+    DAYS_LEFT=$(calculate_remaining_days "$EXP_DATE")
+    if [ "$DAYS_LEFT" -lt 0 ]; then
+        echo "The permission has expired."
+        exit 1
+    fi
+
+# data isp
+isp=$(cat /root/.isp)
+
+# Detail Badwidth
+clear
+
+# Function to read vnstat data
+read_vnstat_usage() {
+  local interface=$1
+  local today=$(vnstat -i "$interface" | grep "today" | awk '{print $8" "$9}')
+  local yesterday=$(vnstat -i "$interface" | grep "yesterday" | awk '{print $8" "$9}')
+  local this_month=$(vnstat -i "$interface" -m | grep "$(date +"%b '%y")" | awk '{print $9" "$10}')
+  
+  echo "$today;$yesterday;$this_month"
+}
+
+# Function to convert to MB unit
+convert_to_mb() {
+  local value=$1
+  local unit=$2
+  
+  case $unit in
+    B) echo "scale=6; $value / 1048576" | bc ;;
+    KiB) echo "scale=6; $value / 1024" | bc ;;
+    MiB) echo "$value" ;;
+    GiB) echo "scale=6; $value * 1024" | bc ;;
+    TiB) echo "scale=6; $value * 1048576" | bc ;;
+    *) echo "0" ;;
+  esac
+}
+
+# Get all interfaces
+all_interfaces=$(vnstat --iflist | sed 's/Available interfaces: //')
+if [ -z "$all_interfaces" ]; then
+  echo "There are no interfaces available in vnstat."
+  exit 1
+fi
+
+total_today=0
+total_yesterday=0
+total_month=0
+
+for iface in $all_interfaces; do
+  echo "“Processing interface: $iface"
+  result=$(read_vnstat_usage "$iface")
+  echo "Result for $iface: $result"
+  
+  today=$(echo "$result" | awk -F';' '{print $1}')
+  yesterday=$(echo "$result" | awk -F';' '{print $2}')
+  month=$(echo "$result" | awk -F';' '{print $3}')
+  
+  today_value=$(echo "$today" | awk '{print $1}')
+  today_unit=$(echo "$today" | awk '{print $2}')
+  
+  yesterday_value=$(echo "$yesterday" | awk '{print $1}')
+  yesterday_unit=$(echo "$yesterday" | awk '{print $2}')
+  
+  month_value=$(echo "$month" | awk '{print $1}')
+  month_unit=$(echo "$month" | awk '{print $2}')
+  
+  total_today=$(echo "$total_today + $(convert_to_mb $today_value $today_unit)" | bc)
+  total_yesterday=$(echo "$total_yesterday + $(convert_to_mb $yesterday_value $yesterday_unit)" | bc)
+  total_month=$(echo "$total_month + $(convert_to_mb $month_value $month_unit)" | bc)
+done
+
+# Format result
+format_usage() {
+  local value=$1
+  if (( $(echo "$value >= 1024" | bc -l) )); then
+    echo "$(printf "%.2f" $(echo "$value / 1024" | bc)) GB"
+  else
+    echo "$(printf "%.2f" $value) MB"
+  fi
+}
+
+ttoday=$(format_usage "$total_today")
+tyest=$(format_usage "$total_yesterday")
+tmon=$(format_usage "$total_month")
+
+# Total account
+xrayvless=$(xray-account count vless 2>/dev/null || echo 0)
+xrayvmess=$(xray-account count vmess 2>/dev/null || echo 0)
+xraytrojan=$(xray-account count trojan 2>/dev/null || echo 0)
+ssc=$(grep -c "###" /etc/shadowsocks-libev/akun.conf 2>/dev/null || true)
+sshd=$(awk -F: '$3 >= 1000 && $1 != "nobody" {print $1}' /etc/passwd | wc -l)
+
+clear
+echo -e ""
+echo -e "${CYAN}┌─────────────────────────────────────────────────┐${plain}"
+echo -e "${keatas} ${bgPutih}               • VPN PANEL MENU •              ${plain} ${keatas}"
+echo -e "${CYAN}└─────────────────────────────────────────────────┘${plain}"
+echo -e "${white}  OS               : $ml"
+echo -e "${white}  RAM              : $tram MB"
+echo -e "${white}  ISP              : $isp"
+echo -e "${white}  Domain           : $domain"
+echo -e "${white}  Usage Today      : ${GREEN}$ttoday${white}"
+echo -e "${white}  Usage Yesterday  : ${GREEN}$tyest${white}"
+echo -e "${white}  Usage Monthly    : ${GREEN}$tmon${NC}"
+echo -e "${CYAN}┌─────────────────────────────────────────────────┐${plain}"
+echo -e "${keatas} ${bgPutih}                • TOTAL ACCOUNT •              ${plain} ${keatas}"
+echo -e "${CYAN}└─────────────────────────────────────────────────┘${plain}"
+printf "${white}     %-12s : %s   %-12s : %s\n" "SSH/Dropbear" "$sshd" "Xray VLESS" "$xrayvless"
+printf "${white}     %-12s : %s   %-12s : %s\n" "Xray VMess" "$xrayvmess" "Xray Trojan" "$xraytrojan"
+printf "${white}     %-12s : %s\n" "Shadowsocks" "$ssc"
+echo -e "${CYAN}┌─────────────────────────────────────────────────┐${plain}"
+echo -e "${keatas} ${bgPutih}                  • MENU LIST •                ${plain} ${keatas}"
+echo -e "${CYAN}└─────────────────────────────────────────────────┘${plain}"
+echo -e "  ${CYAN}[ 1 ]${plain} ${white}Menu SSH${plain}          ${CYAN}[ 6 ]${plain} ${white}Menu Wireguard${plain}"
+echo -e "  ${CYAN}[ 2 ]${plain} ${white}Menu Vless${plain}        ${CYAN}[ 7 ]${plain} ${white}Menu ZiVPN${plain}"
+echo -e "  ${CYAN}[ 3 ]${plain} ${white}Menu Vmess${plain}        ${CYAN}[ 8 ]${plain} ${white}Menu SlowDNS/UDP${plain}"
+echo -e "  ${CYAN}[ 4 ]${plain} ${white}Menu Trojan${plain}       ${CYAN}[ 9 ]${plain} ${white}Menu System VPS${plain}"
+echo -e "  ${CYAN}[ 5 ]${plain} ${white}Menu Shadowsocks${plain}  ${CYAN}[ x ]${plain} ${white}Exit${plain}"
+cmd
+echo -e "${white}  Username   : ${GREEN}$CLIENT_NAME${white}"
+echo -e "${white}  IP Address : ${GREEN}$CLIENT_IP"
+echo -e "${white}  Expire     : ${GREEN}$EXP_DATE${white} [ ${YELLOW}${DAYS_LEFT} ${white}days left ]${NC}"
+cmd
+read -p "  Input Option [1-9 or x]: " lahiya
+case $lahiya in
+1|01) clear ; menu-ssh ;;
+2|02) clear ; menu-vless ;;
+3|03) clear ; menu-vmess ;;
+4|04) clear ; menu-trojan ;;
+5|05) clear ; menu-ss ;;
+6|06) clear ; menu-wgcf ;;
+7|07) clear ; menu-udp-zivpn ;;
+8|08) clear ; menu-udp ;;
+9|09) clear ; menu-system ;;
+x|X) exit ;;
+*) clear ; menu ;;
+esac
+
+__KAIZEN_MENU_LAYOUT_FIX__
+chmod 0755 "$RERE/menu"
+
+
+cat > "$RERE/info" <<'__KAIZEN_INFO_LAYOUT_FIX__'
+#!/usr/bin/env bash
+
+# === COLOUR ===
+export red='\033[0;31m'
+export NC='\033[0m'
+export cyan='\e[0;36m'
+export green='\e[0;32m'
+RED='\e[0;31m'
+GREEN='\e[0;32m'
+YELLOW='\e[0;33m'
+CYAN='\e[0;36m'
+WHITE='\e[0;97m'
+red='\e[0;31m'
+green='\e[0;32m'
+yellow='\e[0;33m'
+cyan='\e[0;36m'
+white='\e[0;97m'
+plain='\e[0m'
+bgPutih='\e[0;47;30m'
+keatas="${CYAN}│${plain}"
+
+# === RAINBOW LINE ===
+cmd() {
+    printf '  '
+    local i
+    for i in {52..57} {57..52}; do
+        printf "\e[38;5;${i}m────\e[0m"
+    done
+    echo
+}
+
+# === SAFE HELPERS ===
+read_file() {
+    [[ -r "$1" ]] && tr -d '\r\n' < "$1"
+}
+
+check_service() {
+    local svc="$1"
+    if systemctl is-active --quiet "$svc" 2>/dev/null; then
+        printf '%bONLINE%b' "$GREEN" "$NC"
+    else
+        printf '%bOFFLINE%b' "$RED" "$NC"
+    fi
+}
+
+check_any_service() {
+    local svc
+    for svc in "$@"; do
+        if systemctl is-active --quiet "$svc" 2>/dev/null; then
+            printf '%bONLINE%b' "$GREEN" "$NC"
+            return 0
+        fi
+    done
+    printf '%bOFFLINE%b' "$RED" "$NC"
+}
+
+count_xray() {
+    local proto="$1"
+    local n
+    n=$(/usr/local/rere/xray-account count "$proto" 2>/dev/null | tail -n1 | tr -dc '0-9')
+    printf '%s' "${n:-0}"
+}
+
+# === VPS INFO ===
+OS=$(hostnamectl 2>/dev/null | awk -F: '/Operating System/{sub(/^[[:space:]]+/,"",$2); print $2; exit}')
+[[ -z "$OS" && -r /etc/os-release ]] && OS=$(. /etc/os-release; printf '%s' "${PRETTY_NAME:-$NAME}")
+OS=${OS:-Unknown}
+RAM=$(free -m 2>/dev/null | awk '/Mem:/ {print $2; exit}')
+RAM=${RAM:-0}
+ISP=$(read_file /root/.isp)
+ISP=${ISP:-Unknown}
+DOMAIN=$(read_file /etc/xray/domain)
+DOMAIN=${DOMAIN:-Unknown}
+
+# === CLIENT DETAILS ===
+PERMISSION_URL='https://kznsc.kznvpn.com/izin.txt'
+LOCAL_IP=$(read_file /root/.ip)
+[[ -z "$LOCAL_IP" ]] && LOCAL_IP=$(curl -4 -fsS --max-time 4 ipinfo.io/ip 2>/dev/null || true)
+CLIENT_NAME='Unknown'
+CLIENT_IP=${LOCAL_IP:-Unknown}
+EXP_DATE='Unknown'
+DAYS_LEFT='0'
+
+calculate_remaining_days() {
+    local expired_date="$1" today expiry
+    today=$(date +%s)
+    expiry=$(date -d "$expired_date" +%s 2>/dev/null) || return 1
+    echo $(( (expiry - today) / 86400 ))
+}
+
+if [[ -n "$LOCAL_IP" ]]; then
+    PERMISSION_DATA=$(curl -fsS --max-time 8 "$PERMISSION_URL" 2>/dev/null || true)
+    if [[ -n "$PERMISSION_DATA" ]]; then
+        MATCH=$(printf '%s\n' "$PERMISSION_DATA" | awk -v ip="$LOCAL_IP" '$0 ~ /###/ && $3 == ip {print; exit}')
+        if [[ -n "$MATCH" ]]; then
+            CLIENT_NAME=$(awk '{print $2}' <<< "$MATCH")
+            CLIENT_IP=$(awk '{print $3}' <<< "$MATCH")
+            EXP_DATE=$(awk '{print $5}' <<< "$MATCH")
+            DAYS_LEFT=$(calculate_remaining_days "$EXP_DATE" 2>/dev/null || echo 0)
+        fi
+    fi
+fi
+
+# === BANDWIDTH USAGE FROM VNSTAT ===
+format_bytes() {
+    local bytes="${1:-0}"
+    awk -v b="$bytes" 'BEGIN {
+        if (b >= 1099511627776) printf "%.2f TB", b/1099511627776;
+        else if (b >= 1073741824) printf "%.2f GB", b/1073741824;
+        else if (b >= 1048576) printf "%.2f MB", b/1048576;
+        else if (b >= 1024) printf "%.2f KB", b/1024;
+        else printf "%.2f MB", b/1048576;
+    }'
+}
+
+TTODAY_BYTES=0
+TYEST_BYTES=0
+TMON_BYTES=0
+
+# Prefer vnStat JSON because it is stable across vnStat display formats.
+if command -v vnstat >/dev/null 2>&1 && command -v jq >/dev/null 2>&1; then
+    VNJSON=$(vnstat --json 2>/dev/null || true)
+    if [[ -n "$VNJSON" ]]; then
+        TTODAY_BYTES=$(jq '[.interfaces[].traffic.day // [] | .[] | select(.date.year == (now|strftime("%Y")|tonumber) and .date.month == (now|strftime("%m")|tonumber) and .date.day == (now|strftime("%d")|tonumber)) | (.rx + .tx)] | add // 0' <<< "$VNJSON" 2>/dev/null || echo 0)
+        TYEST_BYTES=$(jq '[.interfaces[].traffic.day // [] | .[] | select((.date.year|tostring)+"-"+(.date.month|tostring)+"-"+(.date.day|tostring) == ((now-86400)|strftime("%Y-%-m-%-d"))) | (.rx + .tx)] | add // 0' <<< "$VNJSON" 2>/dev/null || echo 0)
+        TMON_BYTES=$(jq '[.interfaces[].traffic.month // [] | .[] | select(.date.year == (now|strftime("%Y")|tonumber) and .date.month == (now|strftime("%m")|tonumber)) | (.rx + .tx)] | add // 0' <<< "$VNJSON" 2>/dev/null || echo 0)
+    fi
+fi
+
+ttoday=$(format_bytes "$TTODAY_BYTES")
+tyest=$(format_bytes "$TYEST_BYTES")
+tmon=$(format_bytes "$TMON_BYTES")
+
+# === SERVICE STATUS ===
+status_xray_vless=$(check_service xray-vless)
+status_xray_vmess=$(check_service xray-vmess)
+status_xray_trojan=$(check_service xray-trojan)
+status_ssh=$(check_any_service ssh sshd)
+status_sslh=$(check_service sslh)
+status_nginx=$(check_service nginx)
+status_haproxy=$(check_service haproxy)
+status_shadowsocks=$(check_any_service shadowsocks-libev shadowsocks-libev.service)
+
+# === TOTAL ACTIVE USERS ===
+xray_vless_user=$(count_xray vless)
+xray_vmess_user=$(count_xray vmess)
+xray_trojan_user=$(count_xray trojan)
+ssh_dropbear_user=$(awk -F: '$3 >= 1000 && $1 != "nobody" && $7 !~ /(nologin|false)$/ {n++} END{print n+0}' /etc/passwd 2>/dev/null)
+ss_user=$(grep -c '###' /etc/shadowsocks-libev/akun.conf 2>/dev/null || true)
+ssh_dropbear_user=${ssh_dropbear_user:-0}
+ss_user=${ss_user:-0}
+
+# === DISPLAY INFORMATION ===
+clear
+echo -e ''
+echo -e "${CYAN}┌─────────────────────────────────────────────────┐${plain}"
+echo -e "${keatas} ${bgPutih}           • VPS DETAIL INFORMATION •          ${plain} ${keatas}"
+echo -e "${CYAN}└─────────────────────────────────────────────────┘${plain}"
+echo -e "${white}  OS               : $OS"
+echo -e "${white}  RAM              : ${RAM} MB"
+echo -e "${white}  ISP              : $ISP"
+echo -e "${white}  Domain           : $DOMAIN"
+echo -e "${white}  Usage Today      : ${GREEN}$ttoday${white}"
+echo -e "${white}  Usage Yesterday  : ${GREEN}$tyest${white}"
+echo -e "${white}  Usage Monthly    : ${GREEN}$tmon${NC}"
+echo -e "${CYAN}┌─────────────────────────────────────────────────┐${plain}"
+echo -e "${keatas} ${bgPutih}               • SERVICE STATUS •              ${plain} ${keatas}"
+echo -e "${CYAN}└─────────────────────────────────────────────────┘${plain}"
+printf "${white}   %-11s : %-7b   ${white}%-11s : %-7b\n" "SSH" "$status_ssh" "SSLH" "$status_sslh"
+printf "${white}   %-11s : %-7b   ${white}%-11s : %-7b\n" "Xray Vless" "$status_xray_vless" "Shadowsocks" "$status_shadowsocks"
+printf "${white}   %-11s : %-7b   ${white}%-11s : %-7b\n" "Xray Vmess" "$status_xray_vmess" "Nginx" "$status_nginx"
+printf "${white}   %-11s : %-7b   ${white}%-11s : %-7b\n" "Xray Trojan" "$status_xray_trojan" "Haproxy" "$status_haproxy"
+echo -e "${CYAN}┌─────────────────────────────────────────────────┐${plain}"
+echo -e "${keatas} ${bgPutih}                • TOTAL ACCOUNT •              ${plain} ${keatas}"
+echo -e "${CYAN}└─────────────────────────────────────────────────┘${plain}"
+printf "${white}     %-12s : %s   %-12s : %s\n" "SSH/Dropbear" "$ssh_dropbear_user" "Xray VLESS" "$xray_vless_user"
+printf "${white}     %-12s : %s   %-12s : %s\n" "Xray VMess" "$xray_vmess_user" "Xray Trojan" "$xray_trojan_user"
+printf "${white}     %-12s : %s\n" "Shadowsocks" "$ss_user"
+echo -e "${CYAN}┌─────────────────────────────────────────────────┐${plain}"
+echo -e "${keatas} ${bgPutih}               • CLIENT DETAILS •              ${plain} ${keatas}"
+echo -e "${CYAN}└─────────────────────────────────────────────────┘${plain}"
+echo -e "${white}  Username   : ${GREEN}$CLIENT_NAME${white}"
+echo -e "${white}  IP Address : ${GREEN}$CLIENT_IP"
+if [[ "$EXP_DATE" != 'Unknown' ]]; then
+    echo -e "${white}  Expire     : ${GREEN}$EXP_DATE${white} [ ${YELLOW}${DAYS_LEFT} ${white}days left ]${NC}"
+else
+    echo -e "${white}  Expire     : ${YELLOW}Unknown${NC}"
+fi
+cmd
+echo -e "            ${white} To access, use ${GREEN}menu${NC} command"
+cmd
+
+__KAIZEN_INFO_LAYOUT_FIX__
+chmod 0755 "$RERE/info"
+
+
+bash -n "$RERE/menu"
+bash -n "$RERE/info"
+
+echo
+echo "Patch installed successfully."
+echo "Backup: $BACKUP"
+echo "- TOTAL ACCOUNT main menu now matches info."
+echo "- SERVICE STATUS reordered and Dropbear removed from display."
+echo "- Client expiry now uses [ N days left ]."
