@@ -2,7 +2,7 @@
 set -euo pipefail
 RERE=/usr/local/rere
 STAMP="$(date +%Y%m%d-%H%M%S)"
-BACKUP="/root/kaizensc-total-inline-backup-${STAMP}"
+BACKUP="/root/kaizensc-total-junction-backup-${STAMP}"
 [[ ${EUID:-$(id -u)} -eq 0 ]] || { echo "Please run as root."; exit 1; }
 [[ -d "$RERE" ]] || { echo "KaizenSC not found: $RERE"; exit 1; }
 mkdir -p "$BACKUP"
@@ -133,8 +133,12 @@ kaizen_ssh_table_total_row(){
   local total="$1" c w y r inner
   c=$(kaizen_table_colour); w=$(kaizen_text_colour); y=$(kaizen_yellow); r=$(kaizen_reset)
   inner=$((KZN_SSH_USER_W + KZN_SSH_EXP_W + KZN_SSH_IP_W + 8))
-  printf '%b├%s┤%b\n' "$c" "$(kaizen_repeat_line '─' "$inner")" "$r"
+  printf '%b├%s┴%s┴%s┤%b\n' "$c" \
+    "$(kaizen_repeat_line '─' $((KZN_SSH_USER_W+2)))" \
+    "$(kaizen_repeat_line '─' $((KZN_SSH_EXP_W+2)))" \
+    "$(kaizen_repeat_line '─' $((KZN_SSH_IP_W+2)))" "$r"
   printf '%b│%b Total User : %b%-*s%b│%b\n' "$c" "$w" "$y" "$((inner-14))" "$total" "$c" "$r"
+  printf '%b└%s┘%b\n' "$c" "$(kaizen_repeat_line '─' "$inner")" "$r"
 }
 kaizen_ssh_table_footer(){
  local c r a b d; c=$(kaizen_table_colour); r=$(kaizen_reset)
@@ -148,8 +152,13 @@ kaizen_xray_table_total_row(){
   local total="$1" c w y r inner
   c=$(kaizen_table_colour); w=$(kaizen_text_colour); y=$(kaizen_yellow); r=$(kaizen_reset)
   inner=$((KZN_XRAY_USER_W + KZN_XRAY_EXP_W + KZN_XRAY_QUOTA_W + KZN_XRAY_IP_W + 11))
-  printf '%b├%s┤%b\n' "$c" "$(kaizen_repeat_line '─' "$inner")" "$r"
+  printf '%b├%s┴%s┴%s┴%s┤%b\n' "$c" \
+    "$(kaizen_repeat_line '─' $((KZN_XRAY_USER_W+2)))" \
+    "$(kaizen_repeat_line '─' $((KZN_XRAY_EXP_W+2)))" \
+    "$(kaizen_repeat_line '─' $((KZN_XRAY_QUOTA_W+2)))" \
+    "$(kaizen_repeat_line '─' $((KZN_XRAY_IP_W+2)))" "$r"
   printf '%b│%b Total User : %b%-*s%b│%b\n' "$c" "$w" "$y" "$((inner-14))" "$total" "$c" "$r"
+  printf '%b└%s┘%b\n' "$c" "$(kaizen_repeat_line '─' "$inner")" "$r"
 }
 kaizen_xray_table_footer(){
  local c r a b q d; c=$(kaizen_table_colour); r=$(kaizen_reset)
@@ -264,7 +273,6 @@ while IFS=$'\t' read -r user limit exp; do
   total_users=$((total_users + 1))
 done < <(jq -r '.[] | [.Username, (.LimitIP // "0"), (.Expired // "Lifetime")] | @tsv' "$DB" 2>/dev/null)
 kaizen_ssh_table_total_row "$total_users"
-kaizen_ssh_table_footer
 
 echo
 read -rp 'Enter username to view detailed information (blank = back): ' wanted
@@ -607,7 +615,6 @@ list(){
    rows=$((rows + 1))
  done < <(sqlite3 -separator '|' "$DB" "SELECT email,expired,ip_limit,quota_bytes FROM accounts WHERE protocol='$p' ORDER BY email;")
  kaizen_xray_table_total_row "$rows"
- kaizen_xray_table_footer
 
  echo
  read -rp 'Enter username to view detailed information (blank = back): ' wanted
