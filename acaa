@@ -1,16 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
-[[ ${EUID:-$(id -u)} -eq 0 ]] || { echo "Run this patch as root."; exit 1; }
-
+[[ ${EUID:-$(id -u)} -eq 0 ]] || { echo "Run as root."; exit 1; }
 RERE=/usr/local/rere
 STAMP="$(date +%Y%m%d-%H%M%S)"
-SAVE="/root/kaizensc-before-telegram-wgipv6-restore-${STAMP}"
+SAVE="/root/kaizensc-before-header-restore-${STAMP}"
 mkdir -p "$SAVE"
-[[ -d "$RERE" ]] || { echo "KaizenSC not found: $RERE"; exit 1; }
-
-# Permanent restore dependency fix for Debian/Ubuntu, including Python 3.13 systems.
-apt-get update -qq
-DEBIAN_FRONTEND=noninteractive apt-get install -y python3 python3-venv python3-pip >/dev/null
 
 [[ -f "$RERE/account-notify" ]] && cp -a "$RERE/account-notify" "$SAVE/account-notify" || true
 cat > "$RERE/account-notify" <<'__KZN_ACCOUNT_NOTIFY__'
@@ -60,9 +54,9 @@ center_line(){
 pt=$(pretty_protocol "$protocol")
 title="${pt} Account Information"
 line="━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-header="<pre>$(html_escape "$line")
+header="$(html_escape "$line")
 $(html_escape "$(center_line "$title")")
-$(html_escape "$line")</pre>"
+$(html_escape "$line")"
 
 body="Event: <code>$(html_escape "$event")</code>
 Account: <code>$(html_escape "$account")</code>"
@@ -116,9 +110,9 @@ center_line(){
 }
 
 line="━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-header="<pre>$(html_escape "$line")
+header="$(html_escape "$line")
 $(html_escape "$(center_line "$title")")
-$(html_escape "$line")</pre>"
+$(html_escape "$line")"
 
 formatted=""
 while IFS= read -r line_in; do
@@ -333,9 +327,9 @@ xray_notify_created_html(){
   hlen=${#title}; ((hwidth<hlen)) && hwidth=$hlen
   hleft=$(( (hwidth-hlen)/2 )); hright=$(( hwidth-hlen-hleft ))
   printf -v centered '%*s%s%*s' "$hleft" '' "$title" "$hright" ''
-  msg="<pre>$(xray_html_escape "$hline")
+  msg="$(xray_html_escape "$hline")
 $(xray_html_escape "$centered")
-$(xray_html_escape "$hline")</pre>"$'\n\n'"${info}"
+$(xray_html_escape "$hline")"$'\n\n'"${info}"
   if ((${#msg}+${#links_html} <= 3900)); then
     xray_send_html "${msg}"$'\n'"${links_html}"
     return 0
@@ -805,515 +799,6 @@ __KZN_XRAY_ACCOUNT__
 chmod 0755 "$RERE/xray-account"
 bash -n "$RERE/xray-account"
 
-[[ -f "$RERE/menu-wgcf" ]] && cp -a "$RERE/menu-wgcf" "$SAVE/menu-wgcf" || true
-cat > "$RERE/menu-wgcf" <<'__KZN_MENU_WGCF__'
-#!/usr/bin/env bash
-source /usr/local/rere/kaizen-ui 2>/dev/null || true
-RED='\e[0;31m'; GREEN='\e[0;32m'; CYAN='\e[0;36m'; WHITE='\e[0;97m'; plain='\e[0m'
-DB=/etc/kaizensc/database/wireguard/accounts.tsv
-WEB=/var/www/html/fn
-mkdir -p "$(dirname "$DB")" "$WEB"; touch "$DB"
-[[ -x /usr/bin/warp ]] || { wget -qO /usr/bin/warp https://raw.githubusercontent.com/rany2/warp.sh/master/warp.sh && chmod +x /usr/bin/warp; }
-domain=$(cat /etc/xray/domain 2>/dev/null || hostname -f)
-header(){ clear; kaizen_header " • $1 • "; }
-cmd(){ printf '  '; for i in {52..57} {57..52}; do printf "\e[38;5;${i}m────\e[0m"; done; echo; }
-valid_user(){ [[ "$1" =~ ^[A-Za-z0-9_.-]+$ ]]; }
-list_accounts(){
- local title="${1:-List Wireguard Account}" count=0 u type exp file uw=16 ew=11
- header "$title"
- while IFS='|' read -r u type exp file; do [[ -n "$u" ]] || continue; exp="${exp%% *}"; ((${#u}>uw))&&uw=${#u}; ((${#exp}>ew))&&ew=${#exp}; done < "$DB"
- C=$(kaizen_table_colour); W=$(kaizen_text_colour); R=$(kaizen_reset); BG='\e[0;47;30m'
- a=$(kaizen_repeat_line '─' $((uw+2))); b=$(kaizen_repeat_line '─' 8); d=$(kaizen_repeat_line '─' $((ew+2)))
- printf '%b┌%s┬%s┬%s┐%b\n' "$C" "$a" "$b" "$d" "$R"
- printf '%b│%b%b %-*s %b%b│%b%b %-6s %b%b│%b%b %-*s %b%b│%b\n' "$C" "$R" "$BG" "$uw" Username "$R" "$C" "$R" "$BG" Type "$R" "$C" "$R" "$BG" "$ew" "Expire Date" "$R" "$C" "$R"
- printf '%b├%s┼%s┼%s┤%b\n' "$C" "$a" "$b" "$d" "$R"
- while IFS='|' read -r u type exp file; do [[ -n "$u" ]] || continue; exp="${exp%% *}"; count=$((count+1)); printf '%b│%b %-*s %b│%b %-6s %b│%b %-*s %b│%b\n' "$C" "$W" "$uw" "$u" "$C" "$W" "$type" "$C" "$W" "$ew" "$exp" "$C" "$R"; done < "$DB"
- LIST_COUNT=$count
- if [[ "${SHOW_WG_TOTAL:-0}" == 1 ]]; then
-   inner=$((uw + 6 + ew + 8))
-   printf '%b├%s┴%s┴%s┤%b\n' "$C" "$a" "$b" "$d" "$R"
-   printf '%b│%b Total User : %b%-*s%b│%b\n' "$C" "$W" "$(kaizen_yellow)" "$((inner-14))" "$count" "$C" "$R"
-   printf '%b└%s┘%b\n' "$C" "$(kaizen_repeat_line '─' "$inner")" "$R"
- else
-   printf '%b└%s┴%s┴%s┘%b\n' "$C" "$a" "$b" "$d" "$R"
- fi
-}
-create_account(){
- local type="$1" flag username expin exp filename url
- header "CREATE WIREGUARD $type ACCOUNT"
- echo -e "  $(kaizen_text_colour)Information on adding an account$(kaizen_reset)"
- echo
- kaizen_expiry_help
- echo
- kaizen_rainbow_line
- echo
- read -rp "Username: " username; valid_user "$username" || { echo -e "${RED}Invalid username.${plain}"; sleep 1; return; }
- awk -F'|' -v u="$username" '$1==u{found=1} END{exit !found}' "$DB" && { echo -e "${RED}Username already exists.${plain}"; sleep 1; return; }
- while true; do
-   read -rp "Expired: " expin
-   exp=$(kaizen_parse_expiry "$expin" 2>/dev/null) && [[ -n "$exp" ]] && break
-   echo -e "${RED}Invalid expiry. Use 10, YYYY-MM-DD, or YYYY-MM-DD HH:MM:SS.${plain}"
- done
- filename="wg-${username}-${type,,}.conf"
- tmpcfg=$(mktemp)
- # WARP's -6 only forces the Cloudflare API request itself over IPv6.
- # That fails on VPS without native IPv6, although the returned WireGuard
- # profile already contains both IPv4 and IPv6 addresses/endpoints.
- if ! warp -4 > "$tmpcfg" 2>/tmp/kaizensc-warp.err || [[ ! -s "$tmpcfg" ]]; then
-   echo -e "${RED}Failed to generate WireGuard config.${plain}"
-   [[ -s /tmp/kaizensc-warp.err ]] && cat /tmp/kaizensc-warp.err
-   rm -f "$tmpcfg" "$WEB/$filename"
-   sleep 2
-   return
- fi
- if [[ "$type" == IPv6 ]]; then
-   # Switch active endpoint from IPv4 to the IPv6 endpoint already supplied
-   # by Cloudflare. Keep IPv4 as a commented fallback.
-   awk '
-     /^Endpoint = / { active=$0; sub(/^Endpoint = /,"#Endpoint = ",active); next }
-     /^#Endpoint = / && $0 ~ /:/ && !done { sub(/^#/,""); print; if(active!="") print active; done=1; next }
-     { print }
-   ' "$tmpcfg" > "$WEB/$filename"
- else
-   cp "$tmpcfg" "$WEB/$filename"
- fi
- rm -f "$tmpcfg"
- if ! grep -q '^\[Interface\]' "$WEB/$filename" || ! grep -q '^\[Peer\]' "$WEB/$filename" || ! grep -q '^Endpoint = ' "$WEB/$filename"; then
-   echo -e "${RED}Generated WireGuard config is invalid.${plain}"
-   rm -f "$WEB/$filename"
-   sleep 2
-   return
- fi
- chmod 0644 "$WEB/$filename" 2>/dev/null || true
- printf '%s|%s|%s|%s\n' "$username" "$type" "$exp" "$filename" >> "$DB"
- url="https://$domain/fn/$filename"
- {
-   echo "Username    : $username"
-   echo "Type        : $type"
-   echo "Expire Date : $exp"
-   echo "Download    : $url"
-   echo
-   echo "WireGuard Config:"
-   cat "$WEB/$filename" 2>/dev/null || true
- } | /usr/local/rere/account-notify-full "WireGuard Account Information" WireGuard "$username" >/dev/null 2>&1 || true
- header "WIREGUARD ACCOUNT CREATED"
- echo "Username    : $username"; echo "Type        : $type"; echo "Expire Date : $exp"; echo "Download    : $url"
- read -rp 'Press Enter to continue...' _
-}
-delete_account(){
- list_accounts "DELETE WIREGUARD ACCOUNT"; ((LIST_COUNT>0)) || { read -rp 'Press Enter...' _; return; }
- read -rp "Username to delete: " user; row=$(awk -F'|' -v u="$user" '$1==u{print;exit}' "$DB"); [[ -n "$row" ]] || { echo "[ERROR] Account not found."; sleep 1; return; }
- read -rp "Delete Wireguard account '$user'? (y/n): " yn; [[ "$yn" =~ ^[Yy]$ ]] || return
- file=$(echo "$row"|cut -d'|' -f4)
- awk -F'|' -v u="$user" '$1!=u' "$DB" > "$DB.tmp"
- mv "$DB.tmp" "$DB"
- rm -f "$WEB/$file"
- /usr/local/rere/account-notify DELETED WireGuard "$user" >/dev/null 2>&1 || true
- header "WIREGUARD ACCOUNT DELETED"; echo "Account : $user"; echo "Status  : DELETED"; read -rp 'Press Enter...' _
-}
-extend_account(){
- list_accounts "EXTEND WIREGUARD ACCOUNT"; ((LIST_COUNT>0)) || { read -rp 'Press Enter...' _; return; }
- echo
- kaizen_expiry_help
- echo
- kaizen_rainbow_line
- echo
- read -rp "Username to extend: " user; row=$(awk -F'|' -v u="$user" '$1==u{print;exit}' "$DB"); [[ -n "$row" ]] || { echo "[ERROR] Account not found."; sleep 1; return; }
- old=$(echo "$row"|cut -d'|' -f3)
- while true; do
-   read -rp "Expired: " expin
-   new=$(kaizen_parse_expiry "$expin" "$old" 2>/dev/null) && [[ -n "$new" ]] && break
-   echo -e "${RED}Invalid expiry. Use 10, YYYY-MM-DD, or YYYY-MM-DD HH:MM:SS.${plain}"
- done
- awk -F'|' -v OFS='|' -v u="$user" -v n="$new" '$1==u{$3=n}1' "$DB" > "$DB.tmp" && mv "$DB.tmp" "$DB"
- /usr/local/rere/account-notify EXTENDED WireGuard "$user" "Expire: $new" >/dev/null 2>&1 || true
- header "WIREGUARD ACCOUNT EXTENDED"
- echo "Account      : $user"
- echo "Previous     : $old"
- echo "New Expiry   : $new"
- echo "Status       : SUCCESS"
- read -rp 'Press Enter...' _
-}
-check_config(){
- list_accounts "CHECK WIREGUARD CONFIG"; ((LIST_COUNT>0)) || { read -rp 'Press Enter...' _; return; }
- read -rp "Username: " user; row=$(awk -F'|' -v u="$user" '$1==u{print;exit}' "$DB"); [[ -n "$row" ]] || { echo "[ERROR] Account not found."; sleep 1; return; }
- IFS='|' read -r u type exp file <<< "$row"; header "WIREGUARD ACCOUNT CONFIG"
- echo "Username    : $u"; echo "Type        : $type"; echo "Expire Date : $exp"; echo "Download    : https://$domain/fn/$file"; echo; cat "$WEB/$file" 2>/dev/null || true
- read -rp 'Press Enter to continue...' _
-}
-while true; do
- header "MENU WIREGUARD"
- echo -e "  ${CYAN}[01]${plain} ${WHITE}Create Account with IPv4${plain}"
- echo -e "  ${CYAN}[02]${plain} ${WHITE}Create Account with IPv6${plain}"
- echo -e "  ${CYAN}[03]${plain} ${WHITE}List Wireguard Account${plain}"
- echo -e "  ${CYAN}[04]${plain} ${WHITE}Delete Wireguard Account${plain}"
- echo -e "  ${CYAN}[05]${plain} ${WHITE}Extend Wireguard Account${plain}"
- echo -e "  ${CYAN}[06]${plain} ${WHITE}Check Wireguard Config${plain}"
- echo -e "  ${CYAN}[07]${plain} ${WHITE}Back to Menu${plain}"
- cmd; echo -e "  ${CYAN}[ x]${plain} ${WHITE}Exit${plain}"; cmd
- read -rp "Please select an option [01-07 or x]: " opt
- case "$opt" in 1|01) create_account IPv4;;2|02) create_account IPv6;;3|03) SHOW_WG_TOTAL=1; list_accounts; SHOW_WG_TOTAL=0; read -rp 'Press Enter...' _;;4|04) delete_account;;5|05) extend_account;;6|06) check_config;;7|07) exec menu;;x|X) exit 0;;*) sleep 1;;esac
-done
-
-__KZN_MENU_WGCF__
-chmod 0755 "$RERE/menu-wgcf"
-bash -n "$RERE/menu-wgcf"
-
-[[ -f "$RERE/restore" ]] && cp -a "$RERE/restore" "$SAVE/restore" || true
-cat > "$RERE/restore" <<'__KZN_RESTORE__'
-#!/usr/bin/env bash
-set -euo pipefail
-source /usr/local/rere/kaizen-ui 2>/dev/null || true
-
-DEFAULT_PASSWORD='KznAutoSC'
-LEGACY_PASSWORD='Rerechan02'
-WORK=$(mktemp -d /tmp/kaizensc-restore.XXXXXX)
-DOWNLOAD_FILE="$WORK/download.zip"
-PRE="/root/kaizensc-pre-restore-$(date '+%Y%m%d-%H%M%S')"
-
-cleanup(){ rm -rf "$WORK"; }
-trap cleanup EXIT
-
-green(){ printf '\e[0;32m%s\e[0m\n' "$*"; }
-yellow(){ printf '\e[0;33m%s\e[0m\n' "$*"; }
-red(){ printf '\e[0;31m%s\e[0m\n' "$*"; }
-
-header(){
-  clear
-  if declare -F kaizen_header >/dev/null 2>&1; then
-    kaizen_header " • $1 • "
-  else
-    echo "=== $1 ==="
-  fi
-}
-
-need(){
-  command -v "$1" >/dev/null 2>&1 || {
-    red "Required command is missing: $1"
-    exit 1
-  }
-}
-
-for cmd in unzip jq awk getent useradd usermod passwd chpasswd chage sha256sum; do need "$cmd"; done
-
-header "RESTORE DATABASE"
-echo "Restore is designed for a VPS where KaizenSC is already installed."
-echo "It restores account databases/configuration, not old OS/system files."
-echo
-
-# Pick newest local KaizenSC backup if present.
-backup_file=$(find /root -maxdepth 1 -type f \( -name '*.zip_[0-9][0-9][0-9][0-9].zip' -o -name 'Backup-*.zip' -o -name 'KaizenSC-Backup-*.zip' \) -printf '%T@ %p\n' 2>/dev/null | sort -nr | awk 'NR==1{$1="";sub(/^ /,"");print}')
-
-if [[ -n "$backup_file" ]]; then
-  echo "Local backup found:"
-  echo "  $backup_file"
-  echo
-  read -rp "Use this backup? (y/n): " use_local
-  [[ "$use_local" =~ ^[Yy]$ ]] || backup_file=""
-fi
-
-if [[ -z "$backup_file" ]]; then
-  echo "Enter one of the following:"
-  echo "- Backup ID from Telegram / Google Drive"
-  echo "- Local ZIP path, e.g. /root/KaizenSC-Backup-xxxx.zip"
-  echo "- Direct HTTPS URL"
-  echo
-  read -rp "Backup ID / path / URL: " input
-  [[ -n "$input" ]] || { red "Restore cancelled."; exit 1; }
-
-  if [[ -f "$input" ]]; then
-    backup_file="$input"
-  else
-    if [[ "$input" == http://* || "$input" == https://* ]]; then
-      backup_url="$input"
-    else
-      backup_url="https://drive.google.com/uc?id=${input}&export=download"
-    fi
-
-    green "Downloading backup..."
-    if [[ "$backup_url" == *"drive.google.com"* ]]; then
-      # Prefer gdown for Google Drive because it handles confirmation pages
-      # for larger files. Install it into an isolated venv only when needed.
-      GDOWN_VENV=/root/.gdown-venv
-      GDOWN_BIN="$GDOWN_VENV/bin/gdown"
-      if [[ ! -x "$GDOWN_BIN" ]]; then
-        if ! command -v python3 >/dev/null 2>&1 || ! python3 -m venv --help >/dev/null 2>&1; then
-          apt-get update -qq
-          DEBIAN_FRONTEND=noninteractive apt-get install -y python3 python3-venv python3-pip >/dev/null
-        fi
-        rm -rf "$GDOWN_VENV"
-        if ! python3 -m venv "$GDOWN_VENV" >/dev/null 2>&1; then
-          pyver=$(python3 -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")' 2>/dev/null || true)
-          apt-get update -qq
-          DEBIAN_FRONTEND=noninteractive apt-get install -y python3-venv python3-pip >/dev/null 2>&1 || true
-          [[ -n "$pyver" ]] && DEBIAN_FRONTEND=noninteractive apt-get install -y "python${pyver}-venv" >/dev/null 2>&1 || true
-          rm -rf "$GDOWN_VENV"
-          python3 -m venv "$GDOWN_VENV" >/dev/null 2>&1 || {
-            red "Unable to create Python virtual environment for Google Drive restore."
-            red "Tried python3-venv and python${pyver:-X.Y}-venv."
-            exit 1
-          }
-        fi
-        "$GDOWN_VENV/bin/python" -m ensurepip --upgrade >/dev/null 2>&1 || true
-        "$GDOWN_VENV/bin/python" -m pip install --upgrade pip >/dev/null 2>&1 || true
-        "$GDOWN_VENV/bin/python" -m pip install --no-cache-dir gdown >/dev/null 2>&1 || {
-          red "Failed to prepare Google Drive downloader."
-          exit 1
-        }
-      fi
-      timeout 600 "$GDOWN_BIN" -O "$DOWNLOAD_FILE" "$backup_url" || {
-        rm -f "$DOWNLOAD_FILE"
-        red "Google Drive backup download failed."
-        exit 1
-      }
-    else
-      need curl
-      curl -fL --retry 3 --retry-delay 2 --connect-timeout 15 --max-time 600         -o "$DOWNLOAD_FILE" "$backup_url" || {
-          rm -f "$DOWNLOAD_FILE"
-          red "Backup download failed."
-          exit 1
-        }
-    fi
-    backup_file="$DOWNLOAD_FILE"
-  fi
-fi
-
-[[ -f "$backup_file" && -s "$backup_file" ]] || {
-  red "Backup ZIP was not found or is empty: $backup_file"
-  exit 1
-}
-
-# Detect supported password.
-ZIP_PASSWORD=""
-if unzip -P "$DEFAULT_PASSWORD" -t "$backup_file" >/dev/null 2>&1; then
-  ZIP_PASSWORD="$DEFAULT_PASSWORD"
-elif unzip -P "$LEGACY_PASSWORD" -t "$backup_file" >/dev/null 2>&1; then
-  ZIP_PASSWORD="$LEGACY_PASSWORD"
-else
-  red "Backup ZIP is damaged or the password is unsupported."
-  exit 1
-fi
-
-green "ZIP integrity check passed."
-mkdir -p "$WORK/extract"
-unzip -q -P "$ZIP_PASSWORD" "$backup_file" -d "$WORK/extract"
-
-SRC="$WORK/extract/backup"
-[[ -d "$SRC" ]] || {
-  red "Invalid backup structure: backup/ directory is missing."
-  exit 1
-}
-
-LEGACY=0
-if [[ -f "$SRC/MANIFEST.json" ]]; then
-  schema=$(jq -r '.backup_schema // 0' "$SRC/MANIFEST.json" 2>/dev/null || echo 0)
-  [[ "$schema" == "2" ]] || {
-    red "Unsupported KaizenSC backup schema: $schema"
-    exit 1
-  }
-
-  [[ -f "$SRC/SHA256SUMS" ]] || {
-    red "Checksum manifest is missing."
-    exit 1
-  }
-
-  green "Verifying backup checksums..."
-  (
-    cd "$WORK/extract"
-    sha256sum -c backup/SHA256SUMS >/dev/null
-  ) || {
-    red "Checksum verification failed. No files were restored."
-    exit 1
-  }
-
-  KZN_SRC="$SRC/etc/kaizensc"
-  XRAY_SRC="$SRC/etc/xray"
-  SS_SRC="$SRC/etc/shadowsocks-libev"
-  ZI_SRC="$SRC/etc/zivpn"
-  LE_SRC="$SRC/etc/letsencrypt"
-  CF_SRC="$SRC/etc/cloudflared"
-  ROOT_CF_SRC="$SRC/root/.cloudflared"
-  WG_WEB_SRC="$SRC/var/www/html/fn"
-  ZI_BIN_SRC="$SRC/usr/local/bin/zivpn"
-  ZI_UNIT_SRC="$SRC/etc/systemd/system/zivpn.service"
-else
-  # Selective compatibility with older KaizenSC backups. Dangerous OS files
-  # such as passwd/shadow/systemd are deliberately ignored.
-  LEGACY=1
-  yellow "Legacy backup detected. Restoring only safe KaizenSC data."
-  KZN_SRC="$SRC/kaizensc"
-  XRAY_SRC="$SRC/xray"
-  SS_SRC="$SRC/shadowsocks-libev"
-  ZI_SRC="$SRC/zivpn"
-  LE_SRC="$SRC/letsencrypt"
-  CF_SRC="$SRC/cloudflared"
-  ROOT_CF_SRC="$SRC/.cloudflared"
-  WG_WEB_SRC=""
-  ZI_BIN_SRC=""
-  ZI_UNIT_SRC=""
-fi
-
-# Validate account databases BEFORE touching current system.
-SSH_DB_SRC="$KZN_SRC/database/ssh/database.json"
-if [[ -f "$SSH_DB_SRC" ]]; then
-  jq empty "$SSH_DB_SRC" >/dev/null 2>&1 || {
-    red "SSH account database is invalid. Restore cancelled."
-    exit 1
-  }
-fi
-
-XRAY_DB_SRC="$KZN_SRC/database/xray/accounts.db"
-if [[ -f "$XRAY_DB_SRC" ]] && command -v sqlite3 >/dev/null 2>&1; then
-  [[ "$(sqlite3 "$XRAY_DB_SRC" 'PRAGMA quick_check;' 2>/dev/null)" == "ok" ]] || {
-    red "Xray account database integrity check failed. Restore cancelled."
-    exit 1
-  }
-fi
-
-header "RESTORE DATABASE"
-echo "Backup       : $backup_file"
-echo "Password     : $ZIP_PASSWORD"
-echo "Backup Type  : $([[ $LEGACY -eq 1 ]] && echo Legacy || echo 'Schema 2')"
-echo
-yellow "A rollback copy of current KaizenSC data will be stored at:"
-echo "  $PRE"
-echo
-read -rp "Continue restore? (y/n): " answer
-[[ "$answer" =~ ^[Yy]$ ]] || { echo "Restore cancelled."; exit 0; }
-
-mkdir -p "$PRE"
-[[ -d /etc/kaizensc ]] && cp -a /etc/kaizensc "$PRE/kaizensc" 2>/dev/null || true
-[[ -d /etc/xray ]] && cp -a /etc/xray "$PRE/xray" 2>/dev/null || true
-[[ -d /etc/shadowsocks-libev ]] && cp -a /etc/shadowsocks-libev "$PRE/shadowsocks-libev" 2>/dev/null || true
-[[ -d /etc/zivpn ]] && cp -a /etc/zivpn "$PRE/zivpn" 2>/dev/null || true
-
-# Stop only services whose live config/data is being replaced.
-for svc in xray-vless xray-vmess xray-trojan zivpn; do
-  systemctl stop "$svc" >/dev/null 2>&1 || true
-done
-
-merge_dir(){
-  local src="$1" dst="$2"
-  [[ -d "$src" ]] || return 0
-  mkdir -p "$dst"
-  cp -a "$src"/. "$dst"/
-}
-copy_file(){
-  local src="$1" dst="$2"
-  [[ -f "$src" ]] || return 0
-  mkdir -p "$(dirname "$dst")"
-  cp -a "$src" "$dst"
-}
-
-green "Restoring KaizenSC databases and configuration..."
-merge_dir "$KZN_SRC" /etc/kaizensc
-merge_dir "$XRAY_SRC" /etc/xray
-merge_dir "$SS_SRC" /etc/shadowsocks-libev
-merge_dir "$ZI_SRC" /etc/zivpn
-merge_dir "$LE_SRC" /etc/letsencrypt
-merge_dir "$CF_SRC" /etc/cloudflared
-merge_dir "$ROOT_CF_SRC" /root/.cloudflared
-[[ -n "$WG_WEB_SRC" ]] && merge_dir "$WG_WEB_SRC" /var/www/html/fn
-if [[ -n "${ZI_BIN_SRC:-}" && -f "$ZI_BIN_SRC" ]]; then
-  copy_file "$ZI_BIN_SRC" /usr/local/bin/zivpn
-  chmod 0755 /usr/local/bin/zivpn
-fi
-if [[ -n "${ZI_UNIT_SRC:-}" && -f "$ZI_UNIT_SRC" ]]; then
-  copy_file "$ZI_UNIT_SRC" /etc/systemd/system/zivpn.service
-  systemctl daemon-reload >/dev/null 2>&1 || true
-  systemctl enable zivpn >/dev/null 2>&1 || true
-fi
-
-if [[ $LEGACY -eq 0 ]]; then
-  copy_file "$SRC/etc/issue.net" /etc/issue.net
-  copy_file "$SRC/etc/dns-manager-selected.conf" /etc/dns-manager-selected.conf
-fi
-
-# Do not restore stale runtime counters from any backup.
-find /etc/kaizensc/limit -type d \( -name usage -o -name cache \) -prune -exec sh -c 'rm -f "$1"/* 2>/dev/null || true' _ {} \; 2>/dev/null || true
-
-# Recreate SSH member accounts from KaizenSC DB; never overwrite OS passwd/shadow.
-SSH_DB=/etc/kaizensc/database/ssh/database.json
-ssh_restored=0
-ssh_skipped=0
-if [[ -f "$SSH_DB" ]]; then
-  while IFS=$'\t' read -r user pass exp locked; do
-    [[ -n "$user" ]] || continue
-
-    # Only safe account names.
-    [[ "$user" =~ ^[A-Za-z0-9_.-]+$ ]] || { ssh_skipped=$((ssh_skipped+1)); continue; }
-
-    if getent passwd "$user" >/dev/null 2>&1; then
-      uid=$(getent passwd "$user" | awk -F: '{print $3}')
-      if [[ ! "$uid" =~ ^[0-9]+$ ]] || ((uid<1000 || uid==65534)); then
-        yellow "Skipped system username: $user"
-        ssh_skipped=$((ssh_skipped+1))
-        continue
-      fi
-      usermod -s /usr/sbin/nologin "$user" >/dev/null 2>&1 || true
-    else
-      useradd --shell /usr/sbin/nologin "$user" >/dev/null 2>&1 || {
-        yellow "Failed to recreate SSH user: $user"
-        ssh_skipped=$((ssh_skipped+1))
-        continue
-      }
-    fi
-
-    [[ -n "$pass" && "$pass" != "null" ]] && printf '%s:%s\n' "$user" "$pass" | chpasswd >/dev/null 2>&1 || true
-
-    if [[ -n "$exp" && "$exp" != "null" && "$exp" != "Lifetime" ]]; then
-      # chage is date-only. +1 day prevents an exact-time account from being
-      # disabled at 00:00 before KaizenSC's exact expiry daemon runs.
-      chage_date=$(date -d "${exp%% *} +1 day" +%F 2>/dev/null || true)
-      [[ -n "$chage_date" ]] && chage -E "$chage_date" "$user" >/dev/null 2>&1 || true
-    fi
-
-    if [[ "$locked" == "true" || "$locked" == "1" ]]; then
-      passwd -l "$user" >/dev/null 2>&1 || true
-    else
-      passwd -u "$user" >/dev/null 2>&1 || true
-    fi
-
-    ssh_restored=$((ssh_restored+1))
-  done < <(jq -r '.[] | [.Username, (.Password//""), (.Expired//""), (.Locked//false)] | @tsv' "$SSH_DB")
-fi
-
-# Re-enable Shadowsocks account services using the fresh VPS's service template.
-if [[ -f /etc/shadowsocks-libev/akun.conf ]]; then
-  while read -r username; do
-    [[ -n "$username" ]] || continue
-    for suffix in tls http; do
-      unit="shadowsocks-libev-server@${username}-${suffix}.service"
-      systemctl enable --now "$unit" >/dev/null 2>&1 || true
-    done
-  done < <(awk '/^### / {print $2}' /etc/shadowsocks-libev/akun.conf | sort -u)
-fi
-
-# Restart only services already installed by the fresh autoscript.
-for svc in xray-vless xray-vmess xray-trojan haproxy nginx sslh ssh cron zivpn cloudflared; do
-  if systemctl cat "$svc" >/dev/null 2>&1; then
-    systemctl restart "$svc" >/dev/null 2>&1 || true
-  fi
-done
-
-# Ensure restored database files have safe root ownership.
-chown -R root:root /etc/kaizensc /etc/xray /etc/shadowsocks-libev /etc/zivpn 2>/dev/null || true
-chmod 600 /etc/kaizensc/bot/notif/bot.key /etc/kaizensc/bot/notif/client.id 2>/dev/null || true
-
-header "RESTORE DATABASE COMPLETED"
-green "Restore completed successfully."
-echo
-echo "SSH Accounts Recreated : $ssh_restored"
-echo "SSH Accounts Skipped   : $ssh_skipped"
-echo "Rollback Copy          : $PRE"
-echo
-echo "Restored important account/database/configuration data only."
-echo "Old OS passwd/shadow/systemd files were NOT restored."
-
-__KZN_RESTORE__
-chmod 0755 "$RERE/restore"
-bash -n "$RERE/restore"
-
 [[ -f "$RERE/addssh" ]] && cp -a "$RERE/addssh" "$SAVE/addssh" || true
 cat > "$RERE/addssh" <<'__KZN_ADDSSH__'
 #!/usr/bin/env bash
@@ -1485,9 +970,9 @@ clear
 
 # Send notification to Telegram bot
 TEKS="
-<pre>━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
      SSH Account Information      
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━</pre>
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 <b> Hostname   :</b> <code>$domain</code> / <code>$IPVPS</code>
 <b> Wildcard   :</b> <code>bug.com.${domain}</code>
 <b> Username   :</b> <code>$Login</code>
@@ -1724,9 +1209,9 @@ clear
 
 # Send notification to Telegram bot
 TEKS="
-<pre>━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
   SSH Trial Account Information   
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━</pre>
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 <b>Host     :</b> <code>$domain</code> / <code>$IPVPS</code>
 <b>User     :</b> <code>$Login</code>
 <b>Pass     :</b> <code>$Pass</code>
@@ -1893,9 +1378,9 @@ service cron restart
 clear
 # Notifikasi Telegram
 TEKS=$(cat <<EOF
-<pre>━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
  Shadowsocks Account Information  
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━</pre>
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 <b>Hostname:</b> <code>${domain}</code>
 <b>Wildcard:</b> <code>bug.com.${domain}</code>
@@ -1940,14 +1425,352 @@ __KZN_ADDSS__
 chmod 0755 "$RERE/addss"
 bash -n "$RERE/addss"
 
+[[ -f "$RERE/restore" ]] && cp -a "$RERE/restore" "$SAVE/restore" || true
+cat > "$RERE/restore" <<'__KZN_RESTORE__'
+#!/usr/bin/env bash
+set -euo pipefail
+source /usr/local/rere/kaizen-ui 2>/dev/null || true
+
+DEFAULT_PASSWORD='KznAutoSC'
+LEGACY_PASSWORD='Rerechan02'
+WORK=$(mktemp -d /tmp/kaizensc-restore.XXXXXX)
+DOWNLOAD_FILE="$WORK/download.zip"
+PRE="/root/kaizensc-pre-restore-$(date '+%Y%m%d-%H%M%S')"
+
+cleanup(){ rm -rf "$WORK"; }
+trap cleanup EXIT
+
+green(){ printf '\e[0;32m%s\e[0m\n' "$*"; }
+yellow(){ printf '\e[0;33m%s\e[0m\n' "$*"; }
+red(){ printf '\e[0;31m%s\e[0m\n' "$*"; }
+
+header(){
+  clear
+  if declare -F kaizen_header >/dev/null 2>&1; then
+    kaizen_header " • $1 • "
+  else
+    echo "=== $1 ==="
+  fi
+}
+
+need(){
+  command -v "$1" >/dev/null 2>&1 || {
+    red "Required command is missing: $1"
+    exit 1
+  }
+}
+
+for cmd in unzip jq awk getent useradd usermod passwd chpasswd chage sha256sum; do need "$cmd"; done
+
+header "RESTORE DATABASE"
+echo "Restore is designed for a VPS where KaizenSC is already installed."
+echo "It restores account databases/configuration, not old OS/system files."
+echo
+
+# Pick newest local KaizenSC backup if present.
+backup_file=$(find /root -maxdepth 1 -type f \( -name '*.zip_[0-9][0-9][0-9][0-9].zip' -o -name 'Backup-*.zip' -o -name 'KaizenSC-Backup-*.zip' \) -printf '%T@ %p\n' 2>/dev/null | sort -nr | awk 'NR==1{$1="";sub(/^ /,"");print}')
+
+if [[ -n "$backup_file" ]]; then
+  echo "Local backup found:"
+  echo "  $backup_file"
+  echo
+  read -rp "Use this backup? (y/n): " use_local
+  [[ "$use_local" =~ ^[Yy]$ ]] || backup_file=""
+fi
+
+if [[ -z "$backup_file" ]]; then
+  echo "Enter one of the following:"
+  echo "- Backup ID from Telegram / Google Drive"
+  echo "- Local ZIP path, e.g. /root/KaizenSC-Backup-xxxx.zip"
+  echo "- Direct HTTPS URL"
+  echo
+  read -rp "Backup ID / path / URL: " input
+  [[ -n "$input" ]] || { red "Restore cancelled."; exit 1; }
+
+  if [[ -f "$input" ]]; then
+    backup_file="$input"
+  else
+    if [[ "$input" == http://* || "$input" == https://* ]]; then
+      backup_url="$input"
+    else
+      backup_url="https://drive.google.com/uc?id=${input}&export=download"
+    fi
+
+    green "Downloading backup..."
+    if [[ "$backup_url" == *"drive.google.com"* ]]; then
+      # Prefer gdown for Google Drive because it handles confirmation pages
+      # for larger files. Install it into an isolated venv only when needed.
+      GDOWN_VENV=/root/.gdown-venv
+      GDOWN_BIN="$GDOWN_VENV/bin/gdown"
+      if [[ ! -x "$GDOWN_BIN" ]]; then
+        if ! command -v python3 >/dev/null 2>&1 || ! python3 -m venv --help >/dev/null 2>&1; then
+          apt-get update -qq
+          DEBIAN_FRONTEND=noninteractive apt-get install -y python3 python3-venv python3-pip >/dev/null
+        fi
+        rm -rf "$GDOWN_VENV"
+        if ! python3 -m venv "$GDOWN_VENV" >/dev/null 2>&1; then
+          pyver=$(python3 -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")' 2>/dev/null || true)
+          apt-get update -qq
+          DEBIAN_FRONTEND=noninteractive apt-get install -y python3-venv python3-pip >/dev/null 2>&1 || true
+          [[ -n "$pyver" ]] && DEBIAN_FRONTEND=noninteractive apt-get install -y "python${pyver}-venv" >/dev/null 2>&1 || true
+          rm -rf "$GDOWN_VENV"
+          python3 -m venv "$GDOWN_VENV" >/dev/null 2>&1 || {
+            red "Unable to create Python virtual environment for Google Drive restore."
+            red "Tried python3-venv and python${pyver:-X.Y}-venv."
+            exit 1
+          }
+        fi
+        "$GDOWN_VENV/bin/python" -m ensurepip --upgrade >/dev/null 2>&1 || true
+        "$GDOWN_VENV/bin/python" -m pip install --upgrade pip >/dev/null 2>&1 || true
+        "$GDOWN_VENV/bin/python" -m pip install --no-cache-dir gdown >/dev/null 2>&1 || {
+          red "Failed to prepare Google Drive downloader."
+          exit 1
+        }
+      fi
+      timeout 600 "$GDOWN_BIN" -O "$DOWNLOAD_FILE" "$backup_url" || {
+        rm -f "$DOWNLOAD_FILE"
+        red "Google Drive backup download failed."
+        exit 1
+      }
+    else
+      need curl
+      curl -fL --retry 3 --retry-delay 2 --connect-timeout 15 --max-time 600         -o "$DOWNLOAD_FILE" "$backup_url" || {
+          rm -f "$DOWNLOAD_FILE"
+          red "Backup download failed."
+          exit 1
+        }
+    fi
+    backup_file="$DOWNLOAD_FILE"
+  fi
+fi
+
+[[ -f "$backup_file" && -s "$backup_file" ]] || {
+  red "Backup ZIP was not found or is empty: $backup_file"
+  exit 1
+}
+
+# Detect supported password.
+ZIP_PASSWORD=""
+if unzip -P "$DEFAULT_PASSWORD" -t "$backup_file" >/dev/null 2>&1; then
+  ZIP_PASSWORD="$DEFAULT_PASSWORD"
+elif unzip -P "$LEGACY_PASSWORD" -t "$backup_file" >/dev/null 2>&1; then
+  ZIP_PASSWORD="$LEGACY_PASSWORD"
+else
+  red "Backup ZIP is damaged or the password is unsupported."
+  exit 1
+fi
+
+green "ZIP integrity check passed."
+mkdir -p "$WORK/extract"
+unzip -q -P "$ZIP_PASSWORD" "$backup_file" -d "$WORK/extract"
+
+SRC="$WORK/extract/backup"
+[[ -d "$SRC" ]] || {
+  red "Invalid backup structure: backup/ directory is missing."
+  exit 1
+}
+
+LEGACY=0
+if [[ -f "$SRC/MANIFEST.json" ]]; then
+  schema=$(jq -r '.backup_schema // 0' "$SRC/MANIFEST.json" 2>/dev/null || echo 0)
+  [[ "$schema" == "2" ]] || {
+    red "Unsupported KaizenSC backup schema: $schema"
+    exit 1
+  }
+
+  [[ -f "$SRC/SHA256SUMS" ]] || {
+    red "Checksum manifest is missing."
+    exit 1
+  }
+
+  green "Verifying backup checksums..."
+  (
+    cd "$WORK/extract"
+    sha256sum -c backup/SHA256SUMS >/dev/null
+  ) || {
+    red "Checksum verification failed. No files were restored."
+    exit 1
+  }
+
+  KZN_SRC="$SRC/etc/kaizensc"
+  XRAY_SRC="$SRC/etc/xray"
+  SS_SRC="$SRC/etc/shadowsocks-libev"
+  ZI_SRC="$SRC/etc/zivpn"
+  LE_SRC="$SRC/etc/letsencrypt"
+  CF_SRC="$SRC/etc/cloudflared"
+  ROOT_CF_SRC="$SRC/root/.cloudflared"
+  WG_WEB_SRC="$SRC/var/www/html/fn"
+  ZI_BIN_SRC="$SRC/usr/local/bin/zivpn"
+  ZI_UNIT_SRC="$SRC/etc/systemd/system/zivpn.service"
+else
+  # Selective compatibility with older KaizenSC backups. Dangerous OS files
+  # such as passwd/shadow/systemd are deliberately ignored.
+  LEGACY=1
+  yellow "Legacy backup detected. Restoring only safe KaizenSC data."
+  KZN_SRC="$SRC/kaizensc"
+  XRAY_SRC="$SRC/xray"
+  SS_SRC="$SRC/shadowsocks-libev"
+  ZI_SRC="$SRC/zivpn"
+  LE_SRC="$SRC/letsencrypt"
+  CF_SRC="$SRC/cloudflared"
+  ROOT_CF_SRC="$SRC/.cloudflared"
+  WG_WEB_SRC=""
+  ZI_BIN_SRC=""
+  ZI_UNIT_SRC=""
+fi
+
+# Validate account databases BEFORE touching current system.
+SSH_DB_SRC="$KZN_SRC/database/ssh/database.json"
+if [[ -f "$SSH_DB_SRC" ]]; then
+  jq empty "$SSH_DB_SRC" >/dev/null 2>&1 || {
+    red "SSH account database is invalid. Restore cancelled."
+    exit 1
+  }
+fi
+
+XRAY_DB_SRC="$KZN_SRC/database/xray/accounts.db"
+if [[ -f "$XRAY_DB_SRC" ]] && command -v sqlite3 >/dev/null 2>&1; then
+  [[ "$(sqlite3 "$XRAY_DB_SRC" 'PRAGMA quick_check;' 2>/dev/null)" == "ok" ]] || {
+    red "Xray account database integrity check failed. Restore cancelled."
+    exit 1
+  }
+fi
+
+header "RESTORE DATABASE"
+echo "Backup       : $backup_file"
+echo "Password     : $ZIP_PASSWORD"
+echo "Backup Type  : $([[ $LEGACY -eq 1 ]] && echo Legacy || echo 'Schema 2')"
+
+mkdir -p "$PRE"
+[[ -d /etc/kaizensc ]] && cp -a /etc/kaizensc "$PRE/kaizensc" 2>/dev/null || true
+[[ -d /etc/xray ]] && cp -a /etc/xray "$PRE/xray" 2>/dev/null || true
+[[ -d /etc/shadowsocks-libev ]] && cp -a /etc/shadowsocks-libev "$PRE/shadowsocks-libev" 2>/dev/null || true
+[[ -d /etc/zivpn ]] && cp -a /etc/zivpn "$PRE/zivpn" 2>/dev/null || true
+
+# Stop only services whose live config/data is being replaced.
+for svc in xray-vless xray-vmess xray-trojan zivpn; do
+  systemctl stop "$svc" >/dev/null 2>&1 || true
+done
+
+merge_dir(){
+  local src="$1" dst="$2"
+  [[ -d "$src" ]] || return 0
+  mkdir -p "$dst"
+  cp -a "$src"/. "$dst"/
+}
+copy_file(){
+  local src="$1" dst="$2"
+  [[ -f "$src" ]] || return 0
+  mkdir -p "$(dirname "$dst")"
+  cp -a "$src" "$dst"
+}
+
+green "Restoring KaizenSC databases and configuration..."
+merge_dir "$KZN_SRC" /etc/kaizensc
+merge_dir "$XRAY_SRC" /etc/xray
+merge_dir "$SS_SRC" /etc/shadowsocks-libev
+merge_dir "$ZI_SRC" /etc/zivpn
+merge_dir "$LE_SRC" /etc/letsencrypt
+merge_dir "$CF_SRC" /etc/cloudflared
+merge_dir "$ROOT_CF_SRC" /root/.cloudflared
+[[ -n "$WG_WEB_SRC" ]] && merge_dir "$WG_WEB_SRC" /var/www/html/fn
+if [[ -n "${ZI_BIN_SRC:-}" && -f "$ZI_BIN_SRC" ]]; then
+  copy_file "$ZI_BIN_SRC" /usr/local/bin/zivpn
+  chmod 0755 /usr/local/bin/zivpn
+fi
+if [[ -n "${ZI_UNIT_SRC:-}" && -f "$ZI_UNIT_SRC" ]]; then
+  copy_file "$ZI_UNIT_SRC" /etc/systemd/system/zivpn.service
+  systemctl daemon-reload >/dev/null 2>&1 || true
+  systemctl enable zivpn >/dev/null 2>&1 || true
+fi
+
+if [[ $LEGACY -eq 0 ]]; then
+  copy_file "$SRC/etc/issue.net" /etc/issue.net
+  copy_file "$SRC/etc/dns-manager-selected.conf" /etc/dns-manager-selected.conf
+fi
+
+# Do not restore stale runtime counters from any backup.
+find /etc/kaizensc/limit -type d \( -name usage -o -name cache \) -prune -exec sh -c 'rm -f "$1"/* 2>/dev/null || true' _ {} \; 2>/dev/null || true
+
+# Recreate SSH member accounts from KaizenSC DB; never overwrite OS passwd/shadow.
+SSH_DB=/etc/kaizensc/database/ssh/database.json
+ssh_restored=0
+ssh_skipped=0
+if [[ -f "$SSH_DB" ]]; then
+  while IFS=$'\t' read -r user pass exp locked; do
+    [[ -n "$user" ]] || continue
+
+    # Only safe account names.
+    [[ "$user" =~ ^[A-Za-z0-9_.-]+$ ]] || { ssh_skipped=$((ssh_skipped+1)); continue; }
+
+    if getent passwd "$user" >/dev/null 2>&1; then
+      uid=$(getent passwd "$user" | awk -F: '{print $3}')
+      if [[ ! "$uid" =~ ^[0-9]+$ ]] || ((uid<1000 || uid==65534)); then
+        yellow "Skipped system username: $user"
+        ssh_skipped=$((ssh_skipped+1))
+        continue
+      fi
+      usermod -s /usr/sbin/nologin "$user" >/dev/null 2>&1 || true
+    else
+      useradd --shell /usr/sbin/nologin "$user" >/dev/null 2>&1 || {
+        yellow "Failed to recreate SSH user: $user"
+        ssh_skipped=$((ssh_skipped+1))
+        continue
+      }
+    fi
+
+    [[ -n "$pass" && "$pass" != "null" ]] && printf '%s:%s\n' "$user" "$pass" | chpasswd >/dev/null 2>&1 || true
+
+    if [[ -n "$exp" && "$exp" != "null" && "$exp" != "Lifetime" ]]; then
+      # chage is date-only. +1 day prevents an exact-time account from being
+      # disabled at 00:00 before KaizenSC's exact expiry daemon runs.
+      chage_date=$(date -d "${exp%% *} +1 day" +%F 2>/dev/null || true)
+      [[ -n "$chage_date" ]] && chage -E "$chage_date" "$user" >/dev/null 2>&1 || true
+    fi
+
+    if [[ "$locked" == "true" || "$locked" == "1" ]]; then
+      passwd -l "$user" >/dev/null 2>&1 || true
+    else
+      passwd -u "$user" >/dev/null 2>&1 || true
+    fi
+
+    ssh_restored=$((ssh_restored+1))
+  done < <(jq -r '.[] | [.Username, (.Password//""), (.Expired//""), (.Locked//false)] | @tsv' "$SSH_DB")
+fi
+
+# Re-enable Shadowsocks account services using the fresh VPS's service template.
+if [[ -f /etc/shadowsocks-libev/akun.conf ]]; then
+  while read -r username; do
+    [[ -n "$username" ]] || continue
+    for suffix in tls http; do
+      unit="shadowsocks-libev-server@${username}-${suffix}.service"
+      systemctl enable --now "$unit" >/dev/null 2>&1 || true
+    done
+  done < <(awk '/^### / {print $2}' /etc/shadowsocks-libev/akun.conf | sort -u)
+fi
+
+# Restart only services already installed by the fresh autoscript.
+for svc in xray-vless xray-vmess xray-trojan haproxy nginx sslh ssh cron zivpn cloudflared; do
+  if systemctl cat "$svc" >/dev/null 2>&1; then
+    systemctl restart "$svc" >/dev/null 2>&1 || true
+  fi
+done
+
+# Ensure restored database files have safe root ownership.
+chown -R root:root /etc/kaizensc /etc/xray /etc/shadowsocks-libev /etc/zivpn 2>/dev/null || true
+chmod 600 /etc/kaizensc/bot/notif/bot.key /etc/kaizensc/bot/notif/client.id 2>/dev/null || true
+
+header "RESTORE DATABASE COMPLETED"
+green "Restore completed successfully."
+echo
+echo
+
+__KZN_RESTORE__
+chmod 0755 "$RERE/restore"
+bash -n "$RERE/restore"
 
 echo
 echo "Patch installed successfully."
-echo "Old files saved at: $SAVE"
-echo
-echo "Fixed:"
-echo "- WireGuard Download URL in Telegram is clickable, not monospace"
-echo "- WireGuard IPv6 creation works even when VPS has no native IPv6"
-echo "- Delete/Renew/Extend/Lock/Ban/Expire/Unlock notifications use protocol Account Information headers"
-echo "- Telegram Account Information titles use fixed-width centering"
-echo "- Restore installs/repairs python3-venv and version-specific venv package when needed"
+echo "- Telegram notification headers are normal text (not monospace)."
+echo "- Restore proceeds without the final y/n confirmation."
+echo "- Requested restore summary/debug information is hidden."
