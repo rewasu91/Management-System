@@ -179,8 +179,15 @@ fetch_engine(){
   fi
   grep -q 'SCRIPT_VERSION=' "$TMP_FILE" || die "Downloaded file is not the expected upstream reinstall engine."
   bash -n "$TMP_FILE" || die "Downloaded reinstall engine failed the Bash syntax check."
-  install -m 700 "$TMP_FILE" "$ENGINE_FILE" || die "Could not install engine at $ENGINE_FILE."
-  [[ -x "$ENGINE_FILE" && -s "$ENGINE_FILE" ]] || die "Engine file is missing or not executable after install."
+  # The engine is always invoked as `bash "$ENGINE_FILE"`, so its executable
+  # bit is not required. Verify the actual file and readability instead.
+  mkdir -p "$(dirname "$ENGINE_FILE")" || die "Could not create engine directory."
+  cp -f "$TMP_FILE" "$ENGINE_FILE" || die "Could not copy engine to $ENGINE_FILE."
+  chmod 600 "$ENGINE_FILE" || die "Could not set permissions on $ENGINE_FILE."
+  [[ -f "$ENGINE_FILE" && -s "$ENGINE_FILE" && -r "$ENGINE_FILE" ]] || {
+    ls -l "$ENGINE_FILE" 2>/dev/null || true
+    die "Engine file was not saved correctly at $ENGINE_FILE."
+  }
   ok "Engine saved as $ENGINE_FILE"
   info "SHA256: $(sha256sum "$ENGINE_FILE" | awk '{print $1}')"
 }
