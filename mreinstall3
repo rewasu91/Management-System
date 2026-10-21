@@ -12,7 +12,7 @@ warn(){ echo -e "${YELLOW}[WARN]${NC} $*"; }
 die(){ echo -e "${RED}[FAIL]${NC} $*" >&2; exit 1; }
 pause(){ read -r -p "Press Enter to continue..." _; }
 
-ENGINE_URL="https://raw.githubusercontent.com/bin456789/reinstall/refs/heads/main/reinstall.sh"
+ENGINE_URL="https://github.com/bin456789/reinstall/blob/main/reinstall.sh"
 ENGINE_FILE="/root/reinstall.sh"
 TMP_FILE="/tmp/vps-reinstall-engine.$$"
 trap 'rm -f "$TMP_FILE" 2>/dev/null || true' EXIT
