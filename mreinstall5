@@ -168,10 +168,16 @@ fetch_engine(){
   curl -fL --retry 3 --retry-delay 2 --connect-timeout 10 --max-time 120 \
     "$ENGINE_URL" -o "$TMP_FILE" || die "Failed to download reinstall engine from raw.githubusercontent.com."
   [[ -s "$TMP_FILE" ]] || die "Downloaded reinstall engine is empty."
-  # Reject GitHub HTML/error pages before installing or executing the file.
-  if ! head -n 1 "$TMP_FILE" | grep -Eq '^#!/(usr/)?bin/(env )?bash|^#!/bin/sh'; then
-    die "Downloaded file does not look like a shell script. Check upstream URL/content."
+  # Upstream currently uses: #!/usr/bin/env sh (then re-execs under Bash).
+  # Accept common sh/bash shebangs, and reject HTML/error pages explicitly.
+  first_line=$(head -n 1 "$TMP_FILE" | tr -d '\r')
+  if ! printf '%s\n' "$first_line" | grep -Eq '^#![[:space:]]*(/usr/bin/env[[:space:]]+)?(/bin/)?(sh|bash)([[:space:]]|$)'; then
+    if head -c 512 "$TMP_FILE" | grep -Eiq '<!doctype[[:space:]]+html|<html|Page not found|Not Found|Access Denied'; then
+      die "Upstream returned an HTML/error page instead of reinstall.sh."
+    fi
+    die "Downloaded file has an unexpected shebang: ${first_line:-<empty>}"
   fi
+  grep -q 'SCRIPT_VERSION=' "$TMP_FILE" || die "Downloaded file is not the expected upstream reinstall engine."
   bash -n "$TMP_FILE" || die "Downloaded reinstall engine failed the Bash syntax check."
   install -m 700 "$TMP_FILE" "$ENGINE_FILE" || die "Could not install engine at $ENGINE_FILE."
   [[ -x "$ENGINE_FILE" && -s "$ENGINE_FILE" ]] || die "Engine file is missing or not executable after install."
