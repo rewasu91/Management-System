@@ -12,7 +12,7 @@ warn(){ echo -e "${YELLOW}[WARN]${NC} $*"; }
 die(){ echo -e "${RED}[FAIL]${NC} $*" >&2; exit 1; }
 pause(){ read -r -p "Press Enter to continue..." _; }
 
-ENGINE_URL="https://github.com/bin456789/reinstall/blob/main/reinstall.sh"
+ENGINE_URL="https://raw.githubusercontent.com/bin456789/reinstall/main/reinstall.sh"
 ENGINE_FILE="/root/reinstall.sh"
 TMP_FILE="/tmp/vps-reinstall-engine.$$"
 trap 'rm -f "$TMP_FILE" 2>/dev/null || true' EXIT
@@ -162,9 +162,19 @@ ok "Internet connectivity is working."
 
 fetch_engine(){
   info "Downloading latest reinstall engine..."
-  curl -fL --retry 3 --retry-delay 2 --connect-timeout 10 "$ENGINE_URL" -o "$TMP_FILE" || die "Failed to download reinstall engine."
+  command -v curl >/dev/null 2>&1 || die "curl is required to download the reinstall engine."
+  command -v install >/dev/null 2>&1 || die "install command is missing."
+  rm -f "$TMP_FILE"
+  curl -fL --retry 3 --retry-delay 2 --connect-timeout 10 --max-time 120 \
+    "$ENGINE_URL" -o "$TMP_FILE" || die "Failed to download reinstall engine from raw.githubusercontent.com."
   [[ -s "$TMP_FILE" ]] || die "Downloaded reinstall engine is empty."
-  install -m 700 "$TMP_FILE" "$ENGINE_FILE"
+  # Reject GitHub HTML/error pages before installing or executing the file.
+  if ! head -n 1 "$TMP_FILE" | grep -Eq '^#!/(usr/)?bin/(env )?bash|^#!/bin/sh'; then
+    die "Downloaded file does not look like a shell script. Check upstream URL/content."
+  fi
+  bash -n "$TMP_FILE" || die "Downloaded reinstall engine failed the Bash syntax check."
+  install -m 700 "$TMP_FILE" "$ENGINE_FILE" || die "Could not install engine at $ENGINE_FILE."
+  [[ -x "$ENGINE_FILE" && -s "$ENGINE_FILE" ]] || die "Engine file is missing or not executable after install."
   ok "Engine saved as $ENGINE_FILE"
   info "SHA256: $(sha256sum "$ENGINE_FILE" | awk '{print $1}')"
 }
@@ -526,6 +536,8 @@ printf '  bash %q' "$ENGINE_FILE"; for a in "${TARGET_CMD[@]}"; do printf ' %q' 
 read -r -p "Start setup now? [y/N]: " go
 case "$go" in y|Y|yes|YES) ;; *) die "Cancelled before boot changes were made.";; esac
 
+[[ -s "$ENGINE_FILE" && -r "$ENGINE_FILE" ]] || die "Engine file $ENGINE_FILE is missing. Re-download failed or the file was removed."
+bash -n "$ENGINE_FILE" || die "Engine file failed the Bash syntax check."
 info "Launching upstream reinstall engine..."
 bash "$ENGINE_FILE" "${TARGET_CMD[@]}"
 
